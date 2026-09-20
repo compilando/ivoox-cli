@@ -1,0 +1,425 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["requests>=2.32,<3", "beautifulsoup4>=4.12,<5"]
+# ///
+"""Descargas públicas de iVoox, biblioteca local y reproducción con mpv."""
+
+import argparse
+import concurrent.futures
+import fcntl
+import http.cookiejar
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
+import requests
+from bs4 import BeautifulSoup
+
+STOP = threading.Event()
+EPISODE = re.compile(r"_rf_(\d+)_")
+KINDS = [("episode", EPISODE), ("list", re.compile(r"_bk_list_(\d+)_")),
+         ("program", re.compile(r"_sq_f1(\d+)_"))]
+
+
+def log(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def source(url):
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme not in {"https", "http"} or not (
+        host == "ivoox.com" or host.endswith(".ivoox.com")
+    ) or parts.username or parts.password:
+        raise ValueError("Se requiere una URL pública de ivoox.com")
+    for kind, pattern in KINDS:
+        match = pattern.search(parts.path)
+        if match:
+            return kind, match[1], urlunsplit(("https", parts.netloc, parts.path, "", ""))
+    raise ValueError("URL no reconocida: usa un episodio (_rf_), lista (_bk_list_) o programa (_sq_f1)")
+
+
+def session(cfg):
+    client = requests.Session()
+    client.headers.update({"User-Agent": "ivx/1.0 (personal podcast downloader)",
+                           "Accept-Encoding": "identity"})
+    cookies = cfg / "cookies.txt"
+    if cookies.exists():
+        jar = http.cookiejar.MozillaCookieJar(str(cookies))
+        jar.load(ignore_discard=True, ignore_expires=True)
+        for cookie in jar:
+            if cookie.expires == 0:
+                cookie.expires = None
+                cookie.discard = True
+            if not cookie.is_expired():
+                client.cookies.set_cookie(cookie)
+    return client
+
+
+def html_page(client, url):
+    response = client.get(url, timeout=(15, 60))
+    response.raise_for_status()
+    if "notFound404" in response.text:
+        raise ValueError(f"iVoox devuelve una página 404: {url}")
+    return BeautifulSoup(response.text, "html.parser")
+
+
+def page_episodes(soup, url, kind):
+    # Las listas clásicas y los programas nuevos tienen estructuras distintas.
+    tabs = soup.select_one("#tabs") if kind == "program" else None
+    scope = tabs.parent if tabs else soup
+    anchors = scope.select('.modulo-type-episodio h2 a[href*="_rf_"]')
+    if not anchors:
+        anchors = scope.select('h3 a[href*="_rf_"], h2 a[href*="_rf_"]')
+    found = {}
+    for anchor in anchors:
+        link = urljoin(url, anchor["href"]).split("#")[0].split("?")[0]
+        match = EPISODE.search(link)
+        if match:
+            found.setdefault(match[1], {"id": match[1], "url": link,
+                                      "title": anchor.get_text(" ", strip=True)})
+    return list(found.values())
+
+
+def next_page(soup, url, kind, identifier):
+    pattern = (rf"_bk_list_{identifier}_(\d+)\.html" if kind == "list"
+               else rf"_sq_f1{identifier}_(\d+)\.html")
+    current = re.search(pattern, url)
+    number = int(current[1]) if current else 1
+    for anchor in soup.select("a[href]"):
+        link = urljoin(url, anchor["href"])
+        match = re.search(pattern, urlsplit(link).path)
+        if match and int(match[1]) == number + 1:
+            source(link)
+            return link.split("#")[0]
+    return None
+
+
+def discover(client, url, limit=None, no_rss=False, max_pages=None, delay=1.5):
+    kind, identifier, url = source(url)
+    if kind == "episode":
+        return [{"id": identifier, "url": url, "title": f"Episodio {identifier}"}], "episode", 1
+    soup = html_page(client, url)
+    if kind == "program" and not no_rss:
+        feed = soup.select_one('a[href*="_fg_f"], link[type="application/rss+xml"]')
+        if feed:
+            try:
+                feed_url = urljoin(url, feed["href"])
+                response = client.get(feed_url, timeout=(15, 60))
+                response.raise_for_status()
+                root = ET.fromstring(response.content)
+                episodes = {}
+                for item in root.findall("./channel/item"):
+                    link = item.findtext("link", "")
+                    match = EPISODE.search(link)
+                    enclosure = item.find("enclosure")
+                    if match and enclosure is not None and enclosure.get("url"):
+                        episodes.setdefault(match[1], {"id": match[1], "url": link,
+                            "title": item.findtext("title", match[1]), "media": enclosure.get("url")})
+                if episodes:
+                    log(f"RSS: {feed_url}")
+                    return list(episodes.values())[:limit], "rss", 1
+                log("RSS sin episodios descargables; usando HTML")
+            except (requests.RequestException, ET.ParseError) as exc:
+                log(f"RSS no disponible ({type(exc).__name__}); usando HTML")
+    episodes = {}
+    visited = set()
+    pages = 0
+    while url and url not in visited:
+        visited.add(url)
+        pages += 1
+        log(f"HTML página {pages}: {url}")
+        items = page_episodes(soup, url, kind)
+        added = 0
+        for episode in items:
+            if episode["id"] not in episodes:
+                episodes[episode["id"]] = episode
+                added += 1
+        if not added:
+            raise ValueError(f"Página sin episodios nuevos: {url}; revisa selectores/paginación")
+        if (limit and len(episodes) >= limit) or (max_pages and pages >= max_pages):
+            break
+        url = next_page(soup, url, kind, identifier)
+        if url:
+            time.sleep(delay)
+            soup = html_page(client, url)
+    return list(episodes.values())[:limit], "html", pages
+
+
+def media_url(client, episode):
+    if episode.get("media"):
+        return episode["media"]
+    soup = html_page(client, episode["url"])
+    title = soup.select_one("h1")
+    if title:
+        episode["title"] = title.get_text(" ", strip=True)
+    # Ruta publicada en el estado de la página, sin ejecutar JavaScript remoto.
+    text = str(soup).replace(r"\u002F", "/").replace(r"\/", "/")
+    match = re.search(rf'/listen_mn_{episode["id"]}_\d+\.mp3', text)
+    if match:
+        return urljoin(episode["url"], match[0])
+    response = client.get(
+        f'https://vcore-web.ivoox.com/v1/public/audios/{episode["id"]}/download-url',
+        timeout=(15, 60),
+    )
+    response.raise_for_status()
+    data = response.json()
+    for obj in [data, data.get("data", {})] if isinstance(data, dict) else []:
+        if isinstance(obj, dict):
+            for key in ("url", "downloadUrl", "download_url"):
+                if isinstance(obj.get(key), str) and obj[key].startswith("https://"):
+                    return obj[key]
+    raise ValueError(f'Sin audio público descargable: {episode["url"]}')
+
+
+def atomic_json(path, data):
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    temporary.replace(path)
+
+
+def audio_file(path):
+    result = subprocess.run(["file", "--brief", "--mime-type", str(path)],
+                            capture_output=True, text=True, check=True)
+    if result.stdout.strip().startswith("audio/"):
+        return
+    if shutil.which("ffprobe"):
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+                                "-of", "json", str(path)], capture_output=True, text=True, check=True)
+        if any(s.get("codec_type") == "audio" for s in json.loads(probe.stdout).get("streams", [])):
+            return
+    else:
+        description = subprocess.check_output(["file", "--brief", str(path)], text=True)
+        if "Audio file" in description or "MPEG ADTS" in description:
+            return
+    raise ValueError(f"La respuesta no es audio: {path.name} ({result.stdout.strip()})")
+
+
+def download(episode, folder, cfg, rate=0):
+    target = folder / f'{episode["id"]}.mp3'
+    if target.exists() and target.stat().st_size:
+        return False
+    partial = target.with_suffix(".mp3.part")
+    meta = target.with_suffix(".mp3.part.json")
+    with session(cfg) as client:
+        offset = partial.stat().st_size if partial.exists() else 0
+        saved = json.loads(meta.read_text()) if offset and meta.exists() else {}
+        url = saved.get("url") or media_url(client, episode)
+        overlap = min(offset, 4096) if saved else 0
+        start = offset - overlap if saved else 0
+        headers = {"Range": f"bytes={start}-"} if offset and saved else {}
+        if headers and saved.get("validator"):
+            headers["If-Range"] = saved["validator"]
+        with client.get(url, headers=headers, stream=True, timeout=(15, 60)) as response:
+            response.raise_for_status()
+            length = response.headers.get("Content-Length")
+            total = int(length) if length else None
+            resumed = bool(headers and response.status_code == 206)
+            if response.status_code == 206:
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
+                                     response.headers.get("Content-Range", ""))
+                if not match or int(match[1]) != start:
+                    raise ValueError("Content-Range inesperado; se conserva el parcial")
+                total = int(match[3])
+                if saved.get("total") and total != saved["total"]:
+                    raise ValueError("El audio remoto cambió de tamaño; se conserva el parcial")
+            content_type = response.headers.get("Content-Type", "").split(";")[0]
+            if content_type.startswith("text/") or "json" in content_type:
+                raise ValueError(f"iVoox devolvió {content_type}, no audio")
+            if not resumed:
+                offset = overlap = 0
+            else:
+                log(f'RESUME {episode["id"]}: HTTP 206 desde {offset} bytes')
+            etag = response.headers.get("ETag", "")
+            validator = etag if etag and not etag.startswith("W/") else response.headers.get("Last-Modified")
+            atomic_json(meta, {"url": response.url, "total": total, "validator": validator})
+            chunks = response.iter_content(64 * 1024)
+            # Verificar solapamiento evita unir audios diferentes por publicidad dinámica.
+            prefix = b""
+            while len(prefix) < overlap:
+                block = next(chunks, b"")
+                if not block:
+                    raise ValueError("Respuesta parcial vacía")
+                prefix += block
+            if overlap:
+                with partial.open("rb") as previous:
+                    previous.seek(offset - overlap)
+                    if previous.read(overlap) != prefix[:overlap]:
+                        raise ValueError("El audio remoto cambió; se conserva el parcial sin mezclarlo")
+            with partial.open("ab" if resumed else "wb") as output:
+                if prefix:
+                    output.write(prefix[overlap:])
+                for chunk in chunks:
+                    if STOP.is_set():
+                        raise InterruptedError("Descarga interrumpida; parcial conservado")
+                    output.write(chunk)
+                    output.flush()
+                    if rate:
+                        STOP.wait(len(chunk) / rate)
+                output.flush()
+                os.fsync(output.fileno())
+            if total is not None and partial.stat().st_size != total:
+                raise ValueError("Descarga incompleta; parcial conservado")
+            audio_file(partial)
+            partial.replace(target)
+            meta.unlink(missing_ok=True)
+            atomic_json(target.with_suffix(".json"), episode)
+            log(f'Descargado: {episode["id"]} — {episode["title"]}')
+            return True
+
+
+def write_playlist(folder):
+    lines = ["#EXTM3U"]
+    for path in sorted(folder.glob("*.mp3")):
+        metadata = path.with_suffix(".json")
+        title = json.loads(metadata.read_text()).get("title", path.stem) if metadata.exists() else path.stem
+        lines.extend(["#EXTINF:-1," + " ".join(title.splitlines()), path.name])
+    temporary = folder / "playlist.m3u.tmp"
+    temporary.write_text("\n".join(lines) + "\n")
+    temporary.replace(folder / "playlist.m3u")
+
+
+def get(args, url):
+    kind, identifier, _ = source(url)
+    folder = args.directory / f"{kind}-{identifier}"
+    folder.mkdir(parents=True, exist_ok=True)
+    with session(args.config) as client:
+        episodes, method, pages = discover(client, url, args.n, args.no_rss,
+                                           delay=args.delay)
+    if not episodes:
+        raise ValueError("No se encontraron episodios")
+    downloaded = failed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.j) as pool:
+        futures = [pool.submit(download, item, folder, args.config, args.rate) for item in episodes]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                downloaded += future.result()
+            except (ValueError, OSError, requests.RequestException, subprocess.SubprocessError) as exc:
+                failed += 1
+                log(f"ERROR: {type(exc).__name__}: {exc}")
+    write_playlist(folder)
+    result = {"downloaded": downloaded, "skipped": len(episodes) - downloaded - failed,
+              "failed": failed, "method": method, "pages": pages, "directory": str(folder)}
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return bool(failed)
+
+
+def positive(value):
+    value = int(value)
+    if value < 1:
+        raise argparse.ArgumentTypeError("debe ser mayor que cero")
+    return value
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dir", dest="directory", type=Path,
+                        default=Path(os.environ.get("IVX_DIR", "~/Podcasts/ivoox")).expanduser())
+    parser.add_argument("--config", type=Path,
+                        default=Path(os.environ.get("IVX_CFG", "~/.config/ivx")).expanduser())
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("get", "sync", "inspect"):
+        command = commands.add_parser(name)
+        if name != "sync":
+            command.add_argument("url")
+        command.add_argument("-n", type=positive, default=None if name == "inspect" else 10)
+        command.add_argument("-j", type=positive, default=1)
+        command.add_argument("--no-rss", action="store_true", help="forzar scraping HTML")
+        command.add_argument("--delay", type=float, default=1.5, help="pausa entre páginas (segundos)")
+        command.add_argument("--rate", type=positive, default=0, help="límite aproximado en bytes/s por descarga")
+        if name == "inspect":
+            command.add_argument("--pages", type=positive)
+    commands.add_parser("add").add_argument("url")
+    commands.add_parser("ls")
+    commands.add_parser("play").add_argument("query", nargs="?", default="")
+    args = parser.parse_args()
+    if args.command == "inspect":
+        with session(args.config) as client:
+            items, method, pages = discover(client, args.url, args.n, args.no_rss,
+                                            args.pages, max(0, args.delay))
+        print(json.dumps({"episodes": items, "method": method, "pages": pages}, ensure_ascii=False))
+        return 0
+    if args.command == "add":
+        kind, identifier, url = source(args.url)
+        args.config.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (args.config / "sources.txt").open("a+") as output:
+            fcntl.flock(output, fcntl.LOCK_EX)
+            output.seek(0)
+            existing = output.read().splitlines()
+            if not any(source(line)[:2] == (kind, identifier) for line in existing
+                       if line.strip() and not line.startswith("#")):
+                output.write(url + "\n")
+        print(url)
+        return 0
+    if args.command in {"ls", "play"}:
+        files = sorted(args.directory.glob("*/*.mp3"))
+        choices = []
+        for path in files:
+            meta = path.with_suffix(".json")
+            title = json.loads(meta.read_text()).get("title", path.stem) if meta.exists() else path.stem
+            label = " ".join(title.splitlines()) + "\t" + str(path.resolve())
+            if args.command == "ls" or args.query.casefold() in label.casefold():
+                choices.append(label)
+        if args.command == "ls":
+            print("\n".join(choices))
+            return 0
+        if not choices:
+            raise ValueError("No hay audios que coincidan en la biblioteca")
+        selected = subprocess.run(["fzf", "--multi", "--delimiter=\t", "--with-nth=1"],
+                                  input="\n".join(choices), capture_output=True, text=True, check=False)
+        if selected.returncode in {1, 130}:
+            return 0
+        selected.check_returncode()
+        return subprocess.call(["mpv", "--no-video", "--"] +
+                               [line.split("\t")[-1] for line in selected.stdout.splitlines()])
+    sources = args.config / "sources.txt"
+    if args.command == "sync" and not sources.exists():
+        log("No hay fuentes. Añádelas con ivx add URL")
+        return 0
+    args.directory.mkdir(parents=True, exist_ok=True)
+    with (args.directory / ".ivx.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("Ya hay otra descarga o limpieza en esta biblioteca") from None
+        if args.command == "get":
+            return get(args, args.url)
+        failed = False
+        for url in sources.read_text().splitlines():
+            if url.strip() and not url.startswith("#"):
+                try:
+                    failed |= get(args, url.strip())
+                except (ValueError, OSError, requests.RequestException) as exc:
+                    failed = True
+                    log(f"ERROR sincronizando {url}: {exc}")
+                if STOP.is_set():
+                    break
+                time.sleep(args.delay)
+        return int(failed)
+
+
+if __name__ == "__main__":
+    def interrupt(signum, frame):
+        STOP.set()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt)
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log("Interrumpido; los .part se conservan para reanudar")
+        sys.exit(130)
+    except (ValueError, OSError, requests.RequestException) as exc:
+        log(f"ERROR: {exc}")
+        sys.exit(1)

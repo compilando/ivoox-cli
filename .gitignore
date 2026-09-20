@@ -1,0 +1,7 @@
+test.env
+__pycache__/
+*.part
+*.part.json
+.test-runs/
+.cache/
+.ruff_cache/
