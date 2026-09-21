@@ -37,7 +37,8 @@ contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming
 | `←` / `→` | Retroceder/avanzar 10 segundos |
 | `+` / `-` | Subir/bajar volumen |
 | `n` / `p` | Siguiente/anterior en la lista seleccionada al empezar a reproducir |
-| `/` | Buscar títulos en la colección actual |
+| `/` | Buscar en el panel activo: podcasts a la izquierda, episodios a la derecha |
+| `f` | Enfocar el filtro de podcasts; admite iniciales o fragmentos del nombre |
 | `o` | Alternar orden: más nuevos, más antiguos y título A–Z |
 | `Esc` | Limpiar búsqueda o volver a colecciones |
 | `a` | Añadir URL de episodio, lista o programa |
@@ -49,9 +50,11 @@ contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming
 | `?` | Mostrar ayuda de teclas |
 | `q` | Salir y detener el mpv de esta interfaz |
 
-La búsqueda conserva el filtro al pulsar Enter; Esc lo quita. Los controles
-por letras no interfieren cuando escribes en un campo de texto. También
-puedes seleccionar con ratón. Se recomienda una terminal de al menos 80×24.
+La búsqueda conserva el filtro al pulsar Enter; Esc lo quita. Al cambiar de
+podcast se limpia automáticamente el filtro de episodios para evitar una lista
+vacía por un término de la colección anterior. Los controles por letras no
+interfieren cuando escribes en un campo de texto. También puedes seleccionar
+con ratón. Se recomienda una terminal de al menos 80×24.
 
 La TUI controla una instancia propia de mpv mediante un socket privado en un
 temporal; no modifica otros reproductores ni la configuración de mpv. Un

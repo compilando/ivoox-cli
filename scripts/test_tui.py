@@ -128,6 +128,34 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.args.directory.exists(), "Añadir una fuente creó la biblioteca")
             await pilot.press("q")
 
+    async def test_collection_filter_and_episode_filter_reset(self):
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            episode_search = self.app.query_one("#search", Input)
+            episode_search.value = "sin coincidencias"
+            episode_search.add_class("visible")
+            await pilot.pause()
+            self.assertEqual(self.app.query_one("#episodes", DataTable).row_count, 0)
+
+            collections = self.app.query_one("#collections", DataTable)
+            collections.focus()
+            collections.move_cursor(row=1)
+            await pilot.pause()
+            self.assertEqual(episode_search.value, "")
+            self.assertFalse(episode_search.has_class("visible"))
+            self.assertEqual(self.app.query_one("#episodes", DataTable).row_count, 2)
+
+            await pilot.press("f", *list("ciencia"))
+            await pilot.pause()
+            podcast_search = self.app.query_one("#collection-search", Input)
+            self.assertIs(self.app.focused, podcast_search)
+            self.assertEqual(collections.row_count, 1)
+            self.assertEqual(self.app.group_key, "program-1234")
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(podcast_search.value, "")
+            self.assertEqual(collections.row_count, 2)
+
     async def test_missing_metadata_and_invalid_source(self):
         folder = self.args.directory / "program-1234"
         (folder / "1.json").write_text("{broken")
