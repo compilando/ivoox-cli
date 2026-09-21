@@ -2,7 +2,7 @@
 
 CLI de Python para descargar episodios, listas públicas y programas de iVoox,
 mantener una biblioteca y reproducirla con `fzf` y `mpv`. Es un script ejecutable
-con metadatos PEP 723: `uv` prepara `requests` y `beautifulsoup4` en un entorno
+con metadatos PEP 723: `uv` prepara `requests`, `beautifulsoup4` y `textual` en un entorno
 aislado. La interfaz de terminal usa Textual. No utiliza pip global ni necesita AUR.
 
 ## Biblioteca interactiva
@@ -35,6 +35,7 @@ local, `↓` un episodio para streaming y `●` uno descargado.
 | `+` / `-` | Subir/bajar volumen |
 | `n` / `p` | Siguiente/anterior en la lista seleccionada al empezar a reproducir |
 | `/` | Buscar títulos en la colección actual |
+| `o` | Alternar orden: más nuevos, más antiguos y título A–Z |
 | `Esc` | Limpiar búsqueda o volver a colecciones |
 | `a` | Añadir URL de episodio, lista o programa |
 | `u` | Descargar hasta 10 episodios de la colección seleccionada |
@@ -74,6 +75,8 @@ make                         # ayuda; no instala ni descarga nada
 make deps                    # sudo pacman -S --needed mpv fzf uv python file
 make install                 # ~/.local/bin/ivx; configuración privada y entorno uv
 make get URL='https://www.ivoox.com/…_rf_123456_1.html' N=2 J=1
+make archive URL='https://www.ivoox.com/…_sq_f112345_1.html' PLAN=1
+make archive URL='https://www.ivoox.com/…_sq_f112345_1.html' J=2
 make add URL='https://www.ivoox.com/…_sq_f112345_1.html'
 make sync N=2
 make sources
@@ -93,15 +96,19 @@ Variables sobreescribibles:
 | `IVX_DIR` | `$(HOME)/Podcasts/ivoox` | Biblioteca |
 | `CFG` | `$(HOME)/.config/ivx` | Fuentes, cookies y cachés de uv |
 | `INTERVAL` | `6h` | Intervalo del temporizador |
-| `URL` | — | Obligatoria para `get` y `add` |
+| `URL` | — | Obligatoria para `get`, `archive` y `add` |
 | `N` | CLI: 10 | Máximo de episodios examinados por fuente |
-| `J` | CLI: 1 | Descargas concurrentes en `get` |
+| `J` | `get`: 1; `archive`: 2 | Descargas simultáneas |
+| `PLAN` | vacío | Con `1`, `archive` cuenta todo sin descargar |
 | `Q` | vacío | Filtro de título/ruta para reproducir |
 
 `N` cuenta episodios seleccionados, incluidos los ya descargados: repetir
 `get N=2` sobre una fuente sin cambios descarga cero, no los dos siguientes.
 Los límites evitan descargar accidentalmente un programa entero. Para ampliar
-el histórico, aumenta `N`. Se pausa 1,5 segundos entre páginas HTML.
+el histórico, aumenta `N`. `archive` es la operación explícita para descargar
+el programa completo: primero descubre todos los episodios y luego usa una cola
+acotada (dos descargas simultáneas por defecto). Se pausa 1,5 segundos entre
+páginas HTML. Antes de una descarga grande, usa `PLAN=1` para ver el total.
 
 ```sh
 make install PREFIX="$HOME/.local" CFG="$HOME/.config/ivx"
@@ -114,6 +121,11 @@ La biblioteca tiene una carpeta por fuente (`episode-ID`, `list-ID`,
 relativas. Un episodio presente en dos fuentes puede ocupar dos archivos.
 La playlist contiene todos los audios completados de esa carpeta, ordenados
 por identificador. `make ls` muestra sus títulos y rutas.
+
+El archivado guarda `archive-state.json` con tareas completadas y fallidas.
+Es seguro relanzarlo: omite los MP3 terminados y reanuda los `.part`. Conserva
+el MP3 original servido por iVoox, sin recodificar ni perder calidad; convertirlo
+a otro códec solo aumentaría tiempo o degradaría el audio.
 
 Solo `make deps` necesita sudo. La primera ejecución de uv/uvx necesita red.
 El Makefile usa `/usr/bin/python`, evita descargas de intérpretes y mantiene

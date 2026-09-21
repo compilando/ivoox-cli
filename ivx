@@ -7,11 +7,11 @@
 
 import argparse
 import asyncio
-import concurrent.futures
 import fcntl
 import http.cookiejar
 import json
 import os
+import queue
 import re
 import shutil
 import signal
@@ -35,6 +35,35 @@ ACCOUNT_PATHS = {
     "/mis-audios_hn.html": ("account-later", "Escuchar más tarde"),
     "/audios-que-me-gustan_hc_recomendados_1.html": ("account-favorites", "Episodios favoritos"),
 }
+
+
+def publication_date(value):
+    """Normaliza fechas habituales de HTML/RSS a YYYY-MM-DD."""
+    if not value:
+        return None
+    value = str(value).strip()
+    match = re.search(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)", value)
+    if match:
+        return "-".join(match.groups())
+    match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", value)
+    if match:
+        day, month, year = match.groups()
+        return f"{year}-{int(month):02d}-{int(day):02d}"
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(value).date().isoformat()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def node_publication_date(node):
+    """Busca una fecha junto a una tarjeta/fila de episodio."""
+    scope = node.find_parent("tr") or node.find_parent(class_="modulo-type-episodio") or node
+    for dated in scope.select('time[datetime], [itemprop="datePublished"][content]'):
+        value = dated.get("datetime") or dated.get("content")
+        if result := publication_date(value):
+            return result
+    return publication_date(scope.get_text(" ", strip=True))
 
 
 def log(message):
@@ -167,7 +196,8 @@ def account_episodes(client, url, limit=20):
         match = EPISODE.search(link)
         if match:
             title = anchor.get_text(" ", strip=True) or f"Episodio {match[1]}"
-            episodes.setdefault(match[1], {"id": match[1], "url": link, "title": title})
+            episodes.setdefault(match[1], {"id": match[1], "url": link, "title": title,
+                                           "published": node_publication_date(anchor)})
         if limit and len(episodes) >= limit:
             break
     return list(episodes.values())
@@ -186,7 +216,8 @@ def page_episodes(soup, url, kind):
         match = EPISODE.search(link)
         if match:
             found.setdefault(match[1], {"id": match[1], "url": link,
-                                      "title": anchor.get_text(" ", strip=True)})
+                                      "title": anchor.get_text(" ", strip=True),
+                                      "published": node_publication_date(anchor)})
     return list(found.values())
 
 
@@ -224,7 +255,8 @@ def discover(client, url, limit=None, no_rss=False, max_pages=None, delay=1.5):
                     enclosure = item.find("enclosure")
                     if match and enclosure is not None and enclosure.get("url"):
                         episodes.setdefault(match[1], {"id": match[1], "url": link,
-                            "title": item.findtext("title", match[1]), "media": enclosure.get("url")})
+                            "title": item.findtext("title", match[1]), "media": enclosure.get("url"),
+                            "published": publication_date(item.findtext("pubDate", ""))})
                 if episodes:
                     log(f"RSS: {feed_url}")
                     return list(episodes.values())[:limit], "rss", 1
@@ -264,6 +296,11 @@ def media_url(client, episode):
         episode["title"] = title.get_text(" ", strip=True)
     # Ruta publicada en el estado de la página, sin ejecutar JavaScript remoto.
     text = str(soup).replace(r"\u002F", "/").replace(r"\/", "/")
+    if not episode.get("published"):
+        dated = soup.select_one('time[datetime], [itemprop="datePublished"][content]')
+        value = (dated.get("datetime") or dated.get("content")) if dated else None
+        match_date = re.search(r'"(?:datePublished|uploadDate)"\s*:\s*"([^"]+)"', text)
+        episode["published"] = publication_date(value or (match_date[1] if match_date else None))
     match = re.search(rf'/listen_mn_{episode["id"]}_\d+\.mp3', text)
     if match:
         return urljoin(episode["url"], match[0])
@@ -307,6 +344,15 @@ def audio_file(path):
 def download(episode, folder, cfg, rate=0):
     target = folder / f'{episode["id"]}.mp3'
     if target.exists() and target.stat().st_size:
+        metadata = target.with_suffix(".json")
+        try:
+            saved_episode = json.loads(metadata.read_text()) if metadata.exists() else {}
+        except (OSError, ValueError):
+            saved_episode = {}
+        enriched = {**saved_episode,
+                    **{key: value for key, value in episode.items() if value is not None}}
+        if enriched != saved_episode:
+            atomic_json(metadata, enriched)
         return False
     partial = target.with_suffix(".mp3.part")
     meta = target.with_suffix(".mp3.part.json")
@@ -388,7 +434,69 @@ def write_playlist(folder):
     temporary.replace(folder / "playlist.m3u")
 
 
-def get(args, url):
+def download_queue(episodes, folder, config, jobs=1, rate=0, state_path=None):
+    """Procesa una cola acotada; los .part hacen cada tarea reanudable."""
+    work = queue.Queue(maxsize=max(2, jobs * 2))
+    lock = threading.Lock()
+    result = {"downloaded": 0, "skipped": 0, "failed": 0}
+    completed = set()
+    failures = {}
+
+    def save_state():
+        if state_path:
+            try:
+                atomic_json(state_path, {
+                    "status": ("failed" if failures else
+                               "complete" if len(completed) == len(episodes) else "running"),
+                    "total": len(episodes), "completed": sorted(completed), "failed": failures,
+                    "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                })
+            except OSError as exc:
+                log(f"AVISO: no se pudo guardar el estado de la cola: {exc}")
+
+    def worker():
+        while True:
+            episode = work.get()
+            try:
+                if episode is None:
+                    return
+                try:
+                    changed = download(episode, folder, config, rate)
+                    with lock:
+                        result["downloaded" if changed else "skipped"] += 1
+                        completed.add(episode["id"])
+                        failures.pop(episode["id"], None)
+                        save_state()
+                        done = sum(result.values())
+                    log(f'COLA {done}/{len(episodes)} · {episode["id"]}')
+                except (ValueError, OSError, requests.RequestException,
+                        subprocess.SubprocessError) as exc:
+                    with lock:
+                        result["failed"] += 1
+                        failures[episode["id"]] = str(exc)
+                        save_state()
+                    log(f"ERROR: {type(exc).__name__}: {exc}")
+            finally:
+                work.task_done()
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(jobs)]
+    for thread in threads:
+        thread.start()
+    for episode in episodes:
+        work.put(episode)
+    for _ in threads:
+        work.put(None)
+    work.join()
+    for thread in threads:
+        thread.join()
+    return result
+
+
+def get(args, url, archive=False):
+    if archive:
+        kind, identifier, url = source(url)
+        if kind != "program":
+            raise ValueError("archive requiere la URL de un programa/podcast (_sq_f1)")
     try:
         kind, identifier, _ = source(url)
     except ValueError as public_error:
@@ -397,31 +505,27 @@ def get(args, url):
         except ValueError:
             raise public_error from None
         with session(args.config) as client:
-            episodes = account_episodes(client, url, args.n)
+            episodes = account_episodes(client, url, getattr(args, "n", None))
         method, pages = "account", 1
     else:
         key = f"{kind}-{identifier}"
         with session(args.config) as client:
-            episodes, method, pages = discover(client, url, args.n, args.no_rss,
+            episodes, method, pages = discover(client, url, None if archive else args.n, args.no_rss,
                                                delay=args.delay)
-    folder = args.directory / key
-    folder.mkdir(parents=True, exist_ok=True)
     if not episodes:
         raise ValueError("No se encontraron episodios")
-    downloaded = failed = 0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.j) as pool:
-        futures = [pool.submit(download, item, folder, args.config, args.rate) for item in episodes]
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                downloaded += future.result()
-            except (ValueError, OSError, requests.RequestException, subprocess.SubprocessError) as exc:
-                failed += 1
-                log(f"ERROR: {type(exc).__name__}: {exc}")
+    folder = args.directory / key
+    if archive and args.plan:
+        print(json.dumps({"episodes": len(episodes), "method": method, "pages": pages,
+                          "directory": str(folder)}, ensure_ascii=False))
+        return False
+    folder.mkdir(parents=True, exist_ok=True)
+    counts = download_queue(episodes, folder, args.config, args.j, args.rate,
+                            folder / "archive-state.json" if archive else None)
     write_playlist(folder)
-    result = {"downloaded": downloaded, "skipped": len(episodes) - downloaded - failed,
-              "failed": failed, "method": method, "pages": pages, "directory": str(folder)}
+    result = {**counts, "method": method, "pages": pages, "directory": str(folder)}
     print(json.dumps(result, ensure_ascii=False), flush=True)
-    return bool(failed)
+    return bool(counts["failed"])
 
 
 def positive(value):
@@ -544,6 +648,7 @@ def library_collections(directory, config):
                 warnings.append(f"Metadatos ausentes o dañados: {audio.name}")
             group["episodes"].append({"id": audio.stem, "path": audio.resolve(),
                                       "url": data.get("url"),
+                                      "published": publication_date(data.get("published")),
                                       "title": " ".join(title.splitlines())})
         if folder.name.startswith("episode-") and group["episodes"]:
             group["title"] = group["episodes"][0]["title"]
@@ -668,6 +773,7 @@ def create_tui(args, player=None):
             Binding("minus", "volume(-5)", "Vol −", show=False),
             Binding("plus,equals", "volume(5)", "Vol +", show=False),
             Binding("slash", "search", "Buscar"), Binding("escape", "back", "Volver", show=False),
+            Binding("o", "sort", "Ordenar"),
             Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar"),
             Binding("r", "refresh_account", "Mi iVoox"),
             Binding("question_mark", "help", "Ayuda"), Binding("q", "quit", "Salir"),
@@ -680,6 +786,7 @@ def create_tui(args, player=None):
             self.account_groups = []
             self.group_key = "all"
             self.visible_episodes = []
+            self.sort_mode = "newest"
             self.queue = []
             self.queue_index = -1
             self.now_title = "Nada en reproducción"
@@ -705,7 +812,9 @@ def create_tui(args, player=None):
 
         def on_mount(self):
             self.query_one("#collections", DataTable).add_column("Audios · Colección")
-            self.query_one("#episodes", DataTable).add_column("Episodios")
+            episodes = self.query_one("#episodes", DataTable)
+            episodes.add_column("Fecha", width=10)
+            episodes.add_column("Episodio")
             self.action_refresh_library()
             self.query_one("#collections").focus()
             self.set_interval(0.5, self.update_player)
@@ -741,13 +850,25 @@ def create_tui(args, player=None):
             if not group:
                 return
             query = self.query_one("#search", Input).value.casefold()
-            self.visible_episodes = [e for e in group["episodes"] if query in e["title"].casefold()]
+            filtered = [e for e in group["episodes"] if query in e["title"].casefold()]
+            if self.sort_mode == "newest":
+                self.visible_episodes = sorted(
+                    filtered, key=lambda e: (bool(e.get("published")), e.get("published") or ""),
+                    reverse=True)
+            elif self.sort_mode == "oldest":
+                self.visible_episodes = sorted(
+                    filtered, key=lambda e: (not bool(e.get("published")), e.get("published") or ""))
+            else:
+                self.visible_episodes = sorted(filtered, key=lambda e: e["title"].casefold())
             table = self.query_one("#episodes", DataTable)
             table.clear()
             for index, episode in enumerate(self.visible_episodes):
                 marker = "●" if episode.get("path") else "↓"
-                table.add_row(Text(f'{marker}  {episode["title"]}'), key=str(index))
-            self.query_one("#collection-title", Static).update(group["title"])
+                table.add_row(episode.get("published") or "—",
+                              Text(f'{marker}  {episode["title"]}'), key=str(index))
+            labels = {"newest": "más nuevos", "oldest": "más antiguos", "title": "A–Z"}
+            self.query_one("#collection-title", Static).update(
+                f'{group["title"]}  ·  {labels[self.sort_mode]}')
             if not group["episodes"]:
                 if group.get("account") and not group.get("loaded"):
                     self.notice("Colección de tu cuenta · Enter carga sus episodios")
@@ -757,7 +878,12 @@ def create_tui(args, player=None):
             elif not self.visible_episodes:
                 self.notice("Ningún episodio coincide con la búsqueda. Esc limpia el filtro.")
             else:
-                self.notice(f"{len(self.visible_episodes)} episodios · Enter reproduce · Tab cambia de panel")
+                self.notice(f"{len(self.visible_episodes)} episodios · o cambia el orden · Enter reproduce")
+
+        def action_sort(self):
+            modes = ("newest", "oldest", "title")
+            self.sort_mode = modes[(modes.index(self.sort_mode) + 1) % len(modes)]
+            self.show_episodes()
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
             if event.data_table.id == "collections" and event.row_key.value:
@@ -890,6 +1016,7 @@ def create_tui(args, player=None):
             self.notify("Tab: panel · ↑↓/j k: navegar · Enter: abrir/reproducir · Espacio: pausa\n"
                         "s: stop · ←→: ±10 s · +/−: volumen · n/p: siguiente/anterior\n"
                         "/: buscar · a: añadir URL · u: descargar colección (10 últimos)\n"
+                        "o: ordenar por fecha descendente/ascendente o título\n"
                         "r: actualizar Mi iVoox · Esc: volver · q: salir y detener mpv\n"
                         "☁: cuenta · ⌂: local · ↓: streaming · ●: descargado", timeout=15)
 
@@ -1005,6 +1132,15 @@ def main():
         command.add_argument("--rate", type=positive, default=0, help="límite aproximado en bytes/s por descarga")
         if name == "inspect":
             command.add_argument("--pages", type=positive)
+    archive = commands.add_parser("archive", help="descargar todos los episodios de un podcast")
+    archive.add_argument("url")
+    archive.add_argument("-j", type=positive, default=2, help="descargas simultáneas (por defecto: 2)")
+    archive.add_argument("--no-rss", action="store_true", help="forzar scraping HTML")
+    archive.add_argument("--delay", type=float, default=1.5, help="pausa entre páginas (segundos)")
+    archive.add_argument("--rate", type=positive, default=0,
+                         help="límite aproximado en bytes/s por descarga")
+    archive.add_argument("--plan", action="store_true",
+                         help="contar episodios sin descargar audio")
     commands.add_parser("add").add_argument("url")
     commands.add_parser("ls")
     commands.add_parser("play").add_argument("query", nargs="?", default="")
@@ -1068,6 +1204,8 @@ def main():
             raise ValueError("Ya hay otra descarga o limpieza en esta biblioteca") from None
         if args.command == "get":
             return get(args, args.url)
+        if args.command == "archive":
+            return get(args, args.url, archive=True)
         failed = False
         for url in sources.read_text().splitlines():
             if url.strip() and not url.startswith("#"):

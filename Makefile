@@ -10,7 +10,7 @@ INTERVAL ?= 6h
 PYTHON ?= /usr/bin/python
 UV ?= uv
 export PREFIX IVX_DIR CFG INTERVAL
-export URL N J Q
+export URL N J Q PLAN
 export IVX_CFG := $(CFG)
 export UV_CACHE_DIR := $(CFG)/uv-cache
 export UV_TOOL_DIR := $(CFG)/uv-tools
@@ -19,7 +19,7 @@ export UV_PYTHON_DOWNLOADS := never
 export UV_NO_MANAGED_PYTHON := 1
 IVX = "$(PREFIX)/bin/ivx"
 
-.PHONY: help deps install uninstall get add sync sources ls play tui cookies timer-install timer-enable timer-disable timer-status logs test test-tui lint clean
+.PHONY: help deps install uninstall get archive add sync sources ls play tui cookies timer-install timer-enable timer-disable timer-status logs test test-tui lint clean
 
 help: ## Lista los objetivos y sus descripciones
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -39,6 +39,11 @@ get: ## Descarga URL=...; opcional N=... y J=...
 	@test -n "$${URL:-}" || { echo 'Falta URL. Uso: make get URL=https://www.ivoox.com/...' >&2; exit 2; }
 	args=(); [[ -z "$${N:-}" ]] || args+=(-n "$$N"); [[ -z "$${J:-}" ]] || args+=(-j "$$J")
 	$(IVX) get "$$URL" "$${args[@]}"
+
+archive: ## Descarga TODO el podcast URL=...; J=2 y PLAN=1 opcionales
+	@test -n "$${URL:-}" || { echo 'Falta URL. Uso: make archive URL=https://www.ivoox.com/..._sq_f1..._1.html' >&2; exit 2; }
+	args=(); [[ -z "$${J:-}" ]] || args+=(-j "$$J"); [[ -z "$${PLAN:-}" ]] || args+=(--plan)
+	$(IVX) archive "$$URL" "$${args[@]}"
 
 add: ## Añade URL=... a las fuentes de sincronización
 	@test -n "$${URL:-}" || { echo 'Falta URL. Uso: make add URL=https://www.ivoox.com/...' >&2; exit 2; }
