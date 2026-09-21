@@ -21,8 +21,9 @@ los audios descargados en `IVX_DIR`.
 La lista de colecciones se guarda 15 minutos en
 `$(CFG)/account-collections.json` para no consultar iVoox en cada arranque.
 Pulsa `r` para actualizarla. Al abrir una colección se cargan sus 20 episodios
-visibles más recientes. `☁` identifica contenido de la cuenta, `⌂` una fuente
-local, `↓` un episodio para streaming y `●` uno descargado.
+visibles más recientes; al llegar al final se consulta automáticamente la
+siguiente página AJAX, o puedes pedirla con `m`. `☁` identifica contenido de la
+cuenta, `⌂` una fuente local, `↓` un episodio para streaming y `●` uno descargado.
 
 | Tecla | Acción |
 | --- | --- |
@@ -39,6 +40,8 @@ local, `↓` un episodio para streaming y `●` uno descargado.
 | `Esc` | Limpiar búsqueda o volver a colecciones |
 | `a` | Añadir URL de episodio, lista o programa |
 | `u` | Descargar hasta 10 episodios de la colección seleccionada |
+| `U` | Archivar todos los episodios del programa/suscripción, previa confirmación |
+| `m` | Cargar manualmente la siguiente página de una colección de la cuenta |
 | `r` | Actualizar Mis listas y Mis suscripciones desde iVoox |
 | `?` | Mostrar ayuda de teclas |
 | `q` | Salir y detener el mpv de esta interfaz |
@@ -122,7 +125,8 @@ relativas. Un episodio presente en dos fuentes puede ocupar dos archivos.
 La playlist contiene todos los audios completados de esa carpeta, ordenados
 por identificador. `make ls` muestra sus títulos y rutas.
 
-El archivado guarda `archive-state.json` con tareas completadas y fallidas.
+El archivado acepta tanto un programa público como una suscripción de tu cuenta
+y guarda `archive-state.json` con tareas completadas y fallidas.
 Es seguro relanzarlo: omite los MP3 terminados y reanuda los `.part`. Conserva
 el MP3 original servido por iVoox, sin recodificar ni perder calidad; convertirlo
 a otro códec solo aumentaría tiempo o degradaría el audio.

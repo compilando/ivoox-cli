@@ -128,10 +128,18 @@ def account_source(url):
     return f"{kind}-{identifier}", "Colección", clean
 
 
-def require_account_page(client, url):
-    response = client.get(url, timeout=(15, 60))
+def require_account_page(client, url, ajax=False):
+    if ajax:
+        response = client.get(url, headers={"X-Requested-With": "XMLHttpRequest"},
+                              timeout=(15, 60))
+    else:
+        response = client.get(url, timeout=(15, 60))
     response.raise_for_status()
-    if "/login_" in urlsplit(response.url).path:
+    parts = urlsplit(response.url)
+    host = parts.hostname or ""
+    if not (host == "ivoox.com" or host.endswith(".ivoox.com")):
+        raise ValueError("iVoox redirigió la colección fuera de su dominio")
+    if "/login_" in parts.path:
         raise ValueError("La sesión de iVoox ha caducado; vuelve a exportar cookies.txt")
     return BeautifulSoup(response.text, "html.parser")
 
@@ -181,15 +189,17 @@ def account_collections(client, config, force=False):
     return result
 
 
-def account_episodes(client, url, limit=20):
-    """Lee la primera tanda visible de una colección privada."""
+def account_episode_page(client, url, next_url=None):
+    """Lee una página inicial o AJAX y devuelve (episodios, siguiente URL)."""
     account_source(url)
-    soup = require_account_page(client, url)
+    page_url = next_url or url
+    soup = require_account_page(client, page_url, ajax=bool(next_url))
     anchors = soup.select('#suscriptions a.title[href*="_rf_"]')
     if not anchors:
         scope = soup.select_one("#listenLater, #myFavouriteAudios") or soup
         anchors = scope.select('.modulo-type-episodio h2 a[href*="_rf_"], '
-                               '.modulo-type-episodio .title-wrapper a[href*="_rf_"]')
+                               '.modulo-type-episodio .title-wrapper a[href*="_rf_"], '
+                               'tr a.title[href*="_rf_"]')
     episodes = {}
     for anchor in anchors:
         link = urljoin(url, anchor["href"]).split("#")[0].split("?")[0]
@@ -198,7 +208,49 @@ def account_episodes(client, url, limit=20):
             title = anchor.get_text(" ", strip=True) or f"Episodio {match[1]}"
             episodes.setdefault(match[1], {"id": match[1], "url": link, "title": title,
                                            "published": node_publication_date(anchor)})
-        if limit and len(episodes) >= limit:
+    items = list(episodes.values())
+    following = None
+    pagination = soup.select_one('[data-trigger="ajax_pagination"][data-href][data-page]')
+    if pagination and items:
+        following = urljoin(url, f'{pagination["data-href"]}_{pagination["data-page"]}.html')
+    elif next_url and len(items) >= 20:
+        match = re.fullmatch(r"(.+_)(\d+)(\.html)(?:\?.*)?", next_url)
+        if match:
+            following = f"{match[1]}{int(match[2]) + 1}{match[3]}"
+    if following:
+        parts = urlsplit(following)
+        host = parts.hostname or ""
+        if parts.scheme != "https" or not (
+                host == "ivoox.com" or host.endswith(".ivoox.com")):
+            raise ValueError("Endpoint de paginación de cuenta no válido")
+    return items, following
+
+
+def account_episodes(client, url, limit=20, delay=1.0):
+    """Recorre la paginación AJAX de una colección privada."""
+    episodes = {}
+    next_url = None
+    first = True
+    visited = set()
+    while first or next_url:
+        page_url = next_url or url
+        if page_url in visited:
+            break
+        visited.add(page_url)
+        if not first:
+            time.sleep(delay)
+        items, next_url = account_episode_page(client, url, next_url)
+        first = False
+        if not items:
+            break
+        added = 0
+        for episode in items:
+            if episode["id"] not in episodes:
+                episodes[episode["id"]] = episode
+                added += 1
+            if limit and len(episodes) >= limit:
+                return list(episodes.values())
+        if not added:
             break
     return list(episodes.values())
 
@@ -493,10 +545,6 @@ def download_queue(episodes, folder, config, jobs=1, rate=0, state_path=None):
 
 
 def get(args, url, archive=False):
-    if archive:
-        kind, identifier, url = source(url)
-        if kind != "program":
-            raise ValueError("archive requiere la URL de un programa/podcast (_sq_f1)")
     try:
         kind, identifier, _ = source(url)
     except ValueError as public_error:
@@ -504,10 +552,16 @@ def get(args, url, archive=False):
             key, _, url = account_source(url)
         except ValueError:
             raise public_error from None
+        if archive and not key.startswith("account-sub-"):
+            raise ValueError("archive requiere un programa público o una suscripción")
         with session(args.config) as client:
-            episodes = account_episodes(client, url, getattr(args, "n", None))
-        method, pages = "account", 1
+            episodes = account_episodes(
+                client, url, None if archive else getattr(args, "n", None),
+                delay=max(0, args.delay))
+        method, pages = "account", max(1, (len(episodes) + 19) // 20)
     else:
+        if archive and kind != "program":
+            raise ValueError("archive requiere un programa público o una suscripción")
         key = f"{kind}-{identifier}"
         with session(args.config) as client:
             episodes, method, pages = discover(client, url, None if archive else args.n, args.no_rss,
@@ -694,6 +748,11 @@ def fetch_account_episodes(config, url, limit=20):
         return account_episodes(client, url, limit)
 
 
+def fetch_account_episode_page(config, url, next_url=None):
+    with session(config) as client:
+        return account_episode_page(client, url, next_url)
+
+
 def resolve_media(config, episode):
     with session(config) as client:
         return media_url(client, episode)
@@ -729,6 +788,22 @@ def create_tui(args, player=None):
                 return
             self.dismiss(event.value.strip())
 
+    class ConfirmArchive(ModalScreen):
+        BINDINGS = (("y", "dismiss(True)", "Sí"), ("n", "dismiss(False)", "No"),
+                    ("escape", "dismiss(False)", "Cancelar"))
+
+        def __init__(self, title):
+            super().__init__()
+            self.podcast_title = title
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="archive-box"):
+                yield Static("Archivar el podcast completo", classes="heading")
+                yield Static(self.podcast_title, id="archive-title", markup=False)
+                yield Static("Se descargarán todos los episodios. Puedes salir y reanudar después.",
+                             classes="muted")
+                yield Static("y · continuar     n / Esc · cancelar", classes="muted")
+
     class LibraryTable(DataTable):
         BINDINGS = (Binding("j", "cursor_down", show=False), Binding("k", "cursor_up", show=False),
                     Binding("g", "scroll_top", show=False), Binding("G", "scroll_bottom", show=False),
@@ -761,6 +836,9 @@ def create_tui(args, player=None):
         AddSource { align: center middle; background: #000000 65%; }
         #add-box { width: 72; max-width: 95%; height: 9; border: round #6ed5b1;
                    background: #1b2532; padding: 1 2; }
+        #archive-box { width: 72; max-width: 95%; height: 11; border: round #d9a441;
+                       background: #1b2532; padding: 1 2; }
+        #archive-title { height: 2; color: #f4d58d; text-style: bold; }
         .heading { height: 2; text-style: bold; }
         .muted { color: #a9b9cb; margin-top: 1; }
         """
@@ -775,6 +853,8 @@ def create_tui(args, player=None):
             Binding("slash", "search", "Buscar"), Binding("escape", "back", "Volver", show=False),
             Binding("o", "sort", "Ordenar"),
             Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar"),
+            Binding("U", "archive_source", "Archivar todo"),
+            Binding("m", "load_more", "Más episodios", show=False),
             Binding("r", "refresh_account", "Mi iVoox"),
             Binding("question_mark", "help", "Ayuda"), Binding("q", "quit", "Salir"),
         )
@@ -878,7 +958,8 @@ def create_tui(args, player=None):
             elif not self.visible_episodes:
                 self.notice("Ningún episodio coincide con la búsqueda. Esc limpia el filtro.")
             else:
-                self.notice(f"{len(self.visible_episodes)} episodios · o cambia el orden · Enter reproduce")
+                more = " · m carga más" if group.get("next_url") else ""
+                self.notice(f"{len(self.visible_episodes)} episodios{more} · o ordena · Enter reproduce")
 
         def action_sort(self):
             modes = ("newest", "oldest", "title")
@@ -889,6 +970,11 @@ def create_tui(args, player=None):
             if event.data_table.id == "collections" and event.row_key.value:
                 self.group_key = event.row_key.value
                 self.show_episodes()
+            elif event.data_table.id == "episodes" and self.visible_episodes:
+                group = next((g for g in self.groups if g["key"] == self.group_key), None)
+                if (group and group.get("next_url") and not group.get("loading") and
+                        event.cursor_row >= len(self.visible_episodes) - 2):
+                    self.load_account_episodes(group["key"], more=True)
 
         async def on_data_table_row_selected(self, event: DataTable.RowSelected):
             if event.data_table.id == "collections":
@@ -1017,6 +1103,7 @@ def create_tui(args, player=None):
                         "s: stop · ←→: ±10 s · +/−: volumen · n/p: siguiente/anterior\n"
                         "/: buscar · a: añadir URL · u: descargar colección (10 últimos)\n"
                         "o: ordenar por fecha descendente/ascendente o título\n"
+                        "m: cargar otra página · U: archivar el podcast completo\n"
                         "r: actualizar Mi iVoox · Esc: volver · q: salir y detener mpv\n"
                         "☁: cuenta · ⌂: local · ↓: streaming · ●: descargado", timeout=15)
 
@@ -1037,20 +1124,46 @@ def create_tui(args, player=None):
                     self.notice(f"No se pudo cargar Mi iVoox: {exc}")
 
         @work(exclusive=True, group="account-episodes")
-        async def load_account_episodes(self, key):
+        async def load_account_episodes(self, key, more=False):
             group = next((item for item in self.account_groups if item["key"] == key), None)
-            if not group:
+            if not group or group.get("loading"):
                 return
-            self.notice(f'Cargando episodios de {group["title"]}…')
+            group["loading"] = True
+            row = self.query_one("#episodes", DataTable).cursor_row
+            self.notice(f'{"Cargando más" if more else "Cargando"} episodios de {group["title"]}…')
             try:
-                group["episodes"] = await asyncio.to_thread(
-                    fetch_account_episodes, args.config, group["url"], 20)
+                items, next_url = await asyncio.to_thread(
+                    fetch_account_episode_page, args.config, group["url"],
+                    group.get("next_url") if more else None)
+                if more:
+                    existing = {episode["id"]: episode for episode in group["episodes"]}
+                    previous = len(existing)
+                    existing.update({episode["id"]: episode for episode in items})
+                    group["episodes"] = list(existing.values())
+                    if len(existing) == previous:
+                        next_url = None
+                else:
+                    group["episodes"] = items
+                group["next_url"] = next_url
                 group["loaded"] = True
+                group["loading"] = False
                 self.group_key = key
                 self.action_refresh_library()
-                self.query_one("#episodes").focus()
+                table = self.query_one("#episodes", DataTable)
+                if more and table.row_count:
+                    table.move_cursor(row=min(row, table.row_count - 1))
+                table.focus()
             except (OSError, ValueError, requests.RequestException) as exc:
                 self.notice(f"No se pudo abrir la colección: {exc}")
+            finally:
+                group["loading"] = False
+
+        def action_load_more(self):
+            group = next((g for g in self.groups if g["key"] == self.group_key), None)
+            if group and group.get("next_url"):
+                self.load_account_episodes(group["key"], more=True)
+            else:
+                self.notice("No hay otra página disponible en esta colección")
 
         def action_add_source(self):
             if not self.busy:
@@ -1069,11 +1182,38 @@ def create_tui(args, player=None):
             else:
                 self.notice("Selecciona una fuente añadida con a para descargar sus episodios")
 
+        def action_archive_source(self):
+            group = next((g for g in self.groups if g["key"] == self.group_key), None)
+            if self.busy:
+                self.notice("Ya hay una operación en curso")
+                return
+            if not group or not group.get("url"):
+                self.notice("Selecciona un programa o una suscripción")
+                return
+            try:
+                kind = source(group["url"])[0]
+                allowed = kind == "program"
+            except ValueError:
+                allowed = account_source(group["url"])[0].startswith("account-sub-")
+            if not allowed:
+                self.notice("El archivado completo se aplica a programas y suscripciones")
+                return
+            self.push_screen(ConfirmArchive(group["title"]),
+                             lambda confirmed: self.archive_result(confirmed, group["url"]))
+
+        def archive_result(self, confirmed, url):
+            if confirmed:
+                self.cli_job("archive", url)
+
         @work(exclusive=True, group="cli")
         async def cli_job(self, *arguments):
             self.busy = True
-            self.notice("Guardando fuente…" if arguments[0] == "add" else
-                        "Descargando hasta 10 episodios… puedes seguir navegando y escuchando")
+            messages = {
+                "add": "Guardando fuente…",
+                "get": "Descargando hasta 10 episodios… puedes seguir navegando y escuchando",
+                "archive": "Archivando el podcast completo… puedes seguir navegando y escuchando",
+            }
+            self.notice(messages[arguments[0]])
             try:
                 self.job = await asyncio.create_subprocess_exec(
                     sys.executable, str(Path(__file__).resolve()), "--dir", str(args.directory),
@@ -1083,11 +1223,15 @@ def create_tui(args, player=None):
                 if not self.closed:
                     self.action_refresh_library()
                     if self.job.returncode:
-                        self.notice("La operación falló; los parciales se conservan. Consulta make get/sync.")
+                        self.notice("La operación falló; los parciales se conservan para reanudar.")
                         self.notify(stderr.decode(errors="replace")[-1000:], severity="error", timeout=10)
                     elif arguments[0] == "get":
                         result = json.loads(stdout.decode().splitlines()[-1])
                         self.notice(f'Descargados: {result["downloaded"]} · Ya guardados: {result["skipped"]}')
+                    elif arguments[0] == "archive":
+                        result = json.loads(stdout.decode().splitlines()[-1])
+                        self.notice(f'Archivo completo · descargados: {result["downloaded"]} · '
+                                    f'ya guardados: {result["skipped"]} · fallidos: {result["failed"]}')
                     else:
                         kind, identifier, _ = source(arguments[1])
                         self.group_key = f"{kind}-{identifier}"

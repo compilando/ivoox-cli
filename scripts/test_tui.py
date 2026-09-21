@@ -183,7 +183,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
           <tr><td><a class="title" href="/uno-audios-mp3_rf_9_1.html">Uno</a></td><td>28/04/2015</td></tr>
           <tr><td><a class="title" href="/dos-audios-mp3_rf_8_1.html">Dos</a></td></tr>
         </tbody>''', "html.parser")
-        with patch.dict(MODULE["require_account_page"].__globals__, {"require_account_page": lambda c, u: html}):
+        with patch.dict(MODULE["require_account_page"].__globals__,
+                        {"require_account_page": lambda c, u, ajax=False: html}):
             episodes = MODULE["account_episodes"](Client(), groups[-1]["url"], 1)
         self.assertEqual(episodes, [{"id": "9", "url": "https://www.ivoox.com/uno-audios-mp3_rf_9_1.html",
                                      "title": "Uno", "published": "2015-04-28"}])
@@ -193,6 +194,28 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.args.directory, self.args.config)[0], groups)
         self.assertEqual(len(merged), 5)
         self.assertTrue(merged[1]["account"])
+
+        initial = BeautifulSoup('''<tbody id="suscriptions" data-trigger="ajax_pagination"
+          data-href="mi-podcast_jb_88" data-page="2">
+          <tr><td><a class="title" href="/uno-audios-mp3_rf_9_1.html">Uno</a></td></tr>
+          <tr><td><a class="title" href="/dos-audios-mp3_rf_8_1.html">Dos</a></td></tr>
+        </tbody>''', "html.parser")
+        second = BeautifulSoup('''
+          <tr><td><a class="title" href="/tres-audios-mp3_rf_7_1.html">Tres</a></td></tr>
+        ''', "html.parser")
+        requested = []
+
+        def paged(client, page_url, ajax=False):
+            requested.append((page_url, ajax))
+            return second if ajax else initial
+
+        clock = type("Clock", (), {"sleep": staticmethod(lambda seconds: None)})
+        with patch.dict(MODULE["account_episode_page"].__globals__,
+                        {"require_account_page": paged, "time": clock}):
+            paged_episodes = MODULE["account_episodes"](Client(), groups[-1]["url"], None, 0)
+        self.assertEqual([episode["id"] for episode in paged_episodes], ["9", "8", "7"])
+        self.assertEqual(requested[1],
+                         ("https://www.ivoox.com/mi-podcast_jb_88_2.html", True))
 
     async def test_account_urls_are_restricted(self):
         valid = MODULE["account_source"]("https://www.ivoox.com/suscripciones_jb_123_1.html")
@@ -228,6 +251,18 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         saved = json.loads(state.read_text())
         self.assertEqual(saved["status"], "complete")
         self.assertEqual(len(saved["completed"]), 8)
+
+    async def test_archive_from_tui_requires_confirmation(self):
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            self.app.group_key = "program-1234"
+            self.app.show_episodes()
+            with patch.object(self.app, "cli_job") as job:
+                await pilot.press("U")
+                await pilot.pause()
+                await pilot.press("y")
+                await pilot.pause()
+                job.assert_called_once_with("archive", self.url)
 
     async def test_publication_date_formats(self):
         parse = MODULE["publication_date"]
