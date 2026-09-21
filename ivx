@@ -836,8 +836,12 @@ def create_tui(args, player=None):
                 self.fraction = fraction
 
         def on_click(self, event: events.Click):
-            if event.button == 1 and self.size.width:
-                fraction = max(0.0, min(1.0, event.x / max(1, self.size.width - 1)))
+            bar = self.query_one("#bar")
+            if event.button == 1 and bar.size.width:
+                # El evento puede originarse en el hijo Bar o en el ProgressBar;
+                # las coordenadas de pantalla evitan mezclar ambos orígenes.
+                x = event.screen_x - bar.region.x
+                fraction = max(0.0, min(1.0, x / max(1, bar.size.width - 1)))
                 self.post_message(self.Seek(fraction))
                 event.stop()
 
@@ -869,6 +873,7 @@ def create_tui(args, player=None):
         #now-playing { height: 1; }
         #timeline { height: 1; color: #a9b9cb; }
         #progress { width: 100%; height: 1; }
+        #progress > #bar { width: 1fr; }
         #progress:hover { background: #1b2532; }
         Footer { background: #1b2532; }
         AddSource, ConfirmArchive { align: center middle; background: #000000 65%; }

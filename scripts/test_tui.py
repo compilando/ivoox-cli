@@ -101,6 +101,9 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 return 64 <= position <= 67
             await self.wait_until(halfway, "El seek absoluto al 50% no funcionó")
             progress = self.app.query_one("#progress")
+            rendered_bar = progress.query_one("#bar")
+            self.assertEqual(rendered_bar.size.width, progress.content_size.width,
+                             "La barra visible no ocupa todo el ancho disponible")
             await pilot.click(progress, offset=(progress.size.width // 4, 0))
             async def first_quarter():
                 position = await self.player.command("get_property", "time-pos")
