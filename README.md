@@ -22,8 +22,10 @@ La lista de colecciones se guarda 15 minutos en
 `$(CFG)/account-collections.json` para no consultar iVoox en cada arranque.
 Pulsa `r` para actualizarla. Al abrir una colección se cargan sus 20 episodios
 visibles más recientes; al llegar al final se consulta automáticamente la
-siguiente página AJAX, o puedes pedirla con `m`. `☁` identifica contenido de la
-cuenta, `⌂` una fuente local, `↓` un episodio para streaming y `●` uno descargado.
+siguiente página AJAX, o puedes pedirla con `m`. El botón **Cargar toda la lista**
+recorre de una vez todas las páginas restantes sin descargar audio. `☁` identifica
+contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming y
+`●` uno descargado.
 
 | Tecla | Acción |
 | --- | --- |
@@ -42,6 +44,7 @@ cuenta, `⌂` una fuente local, `↓` un episodio para streaming y `●` uno des
 | `u` | Descargar hasta 10 episodios de la colección seleccionada |
 | `U` | Archivar todos los episodios del programa/suscripción, previa confirmación |
 | `m` | Cargar manualmente la siguiente página de una colección de la cuenta |
+| `M` | Igual que el botón: cargar todas las páginas restantes |
 | `r` | Actualizar Mis listas y Mis suscripciones desde iVoox |
 | `?` | Mostrar ayuda de teclas |
 | `q` | Salir y detener el mpv de esta interfaz |

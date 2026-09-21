@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bs4 import BeautifulSoup
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 
 MODULE = runpy.run_path(str(Path(__file__).resolve().parent.parent / "ivx"))
 
@@ -263,6 +263,41 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("y")
                 await pilot.pause()
                 job.assert_called_once_with("archive", self.url)
+
+    async def test_load_all_pages_button(self):
+        account_url = "https://www.ivoox.com/mi-podcast_jb_88_1.html"
+        self.app.account_groups = [{
+            "key": "account-sub-88", "title": "Mi podcast", "url": account_url,
+            "account": True, "loaded": True, "loading": False,
+            "next_url": "https://www.ivoox.com/mi-podcast_jb_88_2.html",
+            "episodes": [{"id": "1", "title": "Uno", "published": "2026-01-01"}],
+        }]
+        pages = {
+            "https://www.ivoox.com/mi-podcast_jb_88_2.html": (
+                [{"id": "2", "title": "Dos", "published": "2025-01-01"}],
+                "https://www.ivoox.com/mi-podcast_jb_88_3.html"),
+            "https://www.ivoox.com/mi-podcast_jb_88_3.html": (
+                [{"id": "3", "title": "Tres", "published": "2024-01-01"}], None),
+        }
+
+        def fetch(config, url, next_url):
+            return pages[next_url]
+
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            self.app.group_key = "account-sub-88"
+            self.app.action_refresh_library()
+            self.assertTrue(self.app.query_one("#pagination").has_class("visible"))
+            self.assertEqual(str(self.app.query_one("#load-all", Button).label),
+                             "Cargar toda la lista")
+            with patch.dict(MODULE["fetch_account_episode_page"].__globals__,
+                            {"fetch_account_episode_page": fetch}):
+                await pilot.click("#load-all")
+                await self.app.workers.wait_for_complete()
+                await pilot.pause()
+            group = next(g for g in self.app.account_groups if g["key"] == "account-sub-88")
+            self.assertEqual([episode["id"] for episode in group["episodes"]], ["1", "2", "3"])
+            self.assertIsNone(group["next_url"])
+            self.assertFalse(self.app.query_one("#pagination").has_class("visible"))
 
     async def test_publication_date_formats(self):
         parse = MODULE["publication_date"]

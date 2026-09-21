@@ -766,7 +766,7 @@ def create_tui(args, player=None):
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
     from textual.screen import ModalScreen
-    from textual.widgets import DataTable, Footer, Input, ProgressBar, Static
+    from textual.widgets import Button, DataTable, Footer, Input, ProgressBar, Static
 
     class AddSource(ModalScreen):
         BINDINGS = (("escape", "dismiss(None)", "Cancelar"),)
@@ -821,6 +821,10 @@ def create_tui(args, player=None):
         #episode-pane { width: 1fr; margin-left: 1; }
         #collection-title { height: 2; padding: 0 1; color: #6ed5b1; }
         #episodes { height: 1fr; border: round #344355; }
+        #pagination { display: none; height: 3; padding: 0 1; }
+        #pagination.visible { display: block; }
+        #pagination-status { width: 1fr; height: 3; padding: 1 1; color: #a9b9cb; }
+        #load-all { width: 24; height: 3; min-width: 20; }
         DataTable:focus { border: round #6ed5b1; }
         DataTable { overflow-x: hidden; }
         DataTable > .datatable--cursor { background: #245447; color: #ffffff; }
@@ -855,6 +859,7 @@ def create_tui(args, player=None):
             Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar"),
             Binding("U", "archive_source", "Archivar todo"),
             Binding("m", "load_more", "Más episodios", show=False),
+            Binding("M", "load_all", "Cargar lista", show=False),
             Binding("r", "refresh_account", "Mi iVoox"),
             Binding("question_mark", "help", "Ayuda"), Binding("q", "quit", "Salir"),
         )
@@ -882,6 +887,9 @@ def create_tui(args, player=None):
                 with Vertical(id="episode-pane"):
                     yield Static("Toda la biblioteca", id="collection-title", markup=False)
                     yield LibraryTable(id="episodes", cursor_type="row", show_row_labels=False)
+                    with Horizontal(id="pagination"):
+                        yield Static("", id="pagination-status", markup=False)
+                        yield Button("Cargar toda la lista", id="load-all", variant="primary")
             yield Input(placeholder="Filtrar episodios…  Enter: volver a la lista · Esc: limpiar", id="search")
             yield Static("Tab cambia de panel · ↑↓ / j k navegan · Enter reproduce", id="notice", markup=False)
             with Vertical(id="player"):
@@ -949,6 +957,16 @@ def create_tui(args, player=None):
             labels = {"newest": "más nuevos", "oldest": "más antiguos", "title": "A–Z"}
             self.query_one("#collection-title", Static).update(
                 f'{group["title"]}  ·  {labels[self.sort_mode]}')
+            pagination = self.query_one("#pagination")
+            button = self.query_one("#load-all", Button)
+            if group.get("next_url"):
+                pagination.add_class("visible")
+                button.disabled = bool(group.get("loading"))
+                button.label = "Cargando…" if group.get("loading") else "Cargar toda la lista"
+                self.query_one("#pagination-status", Static).update(
+                    f'{len(group["episodes"])} cargados · quedan más páginas')
+            else:
+                pagination.remove_class("visible")
             if not group["episodes"]:
                 if group.get("account") and not group.get("loaded"):
                     self.notice("Colección de tu cuenta · Enter carga sus episodios")
@@ -1103,7 +1121,7 @@ def create_tui(args, player=None):
                         "s: stop · ←→: ±10 s · +/−: volumen · n/p: siguiente/anterior\n"
                         "/: buscar · a: añadir URL · u: descargar colección (10 últimos)\n"
                         "o: ordenar por fecha descendente/ascendente o título\n"
-                        "m: cargar otra página · U: archivar el podcast completo\n"
+                        "m: otra página · M/botón: lista completa · U: archivar todo\n"
                         "r: actualizar Mi iVoox · Esc: volver · q: salir y detener mpv\n"
                         "☁: cuenta · ⌂: local · ↓: streaming · ●: descargado", timeout=15)
 
@@ -1164,6 +1182,53 @@ def create_tui(args, player=None):
                 self.load_account_episodes(group["key"], more=True)
             else:
                 self.notice("No hay otra página disponible en esta colección")
+
+        def on_button_pressed(self, event: Button.Pressed):
+            if event.button.id == "load-all":
+                self.action_load_all()
+
+        def action_load_all(self):
+            group = next((g for g in self.groups if g["key"] == self.group_key), None)
+            if group and group.get("next_url"):
+                self.load_all_account_episodes(group["key"])
+            else:
+                self.notice("La colección ya está cargada completamente")
+
+        @work(exclusive=True, group="account-all-pages")
+        async def load_all_account_episodes(self, key):
+            group = next((item for item in self.account_groups if item["key"] == key), None)
+            if not group or group.get("loading") or not group.get("next_url"):
+                return
+            group["loading"] = True
+            self.group_key = key
+            self.action_refresh_library()
+            pages = 0
+            final_message = None
+            try:
+                while group.get("next_url"):
+                    items, next_url = await asyncio.to_thread(
+                        fetch_account_episode_page, args.config, group["url"], group["next_url"])
+                    existing = {episode["id"]: episode for episode in group["episodes"]}
+                    previous = len(existing)
+                    existing.update({episode["id"]: episode for episode in items})
+                    group["episodes"] = list(existing.values())
+                    group["next_url"] = next_url if len(existing) > previous else None
+                    group["loaded"] = True
+                    pages += 1
+                    self.action_refresh_library()
+                    self.notice(f'Cargando lista completa · {len(existing)} episodios · '
+                                f'{pages} páginas nuevas')
+                    if group.get("next_url"):
+                        await asyncio.sleep(0 if getattr(args, "local_only", False) else 1.0)
+                final_message = f'Lista completa: {len(group["episodes"])} episodios'
+            except (OSError, ValueError, requests.RequestException) as exc:
+                final_message = f"No se pudo completar la lista: {exc}"
+            finally:
+                group["loading"] = False
+                self.action_refresh_library()
+                self.query_one("#episodes").focus()
+                if final_message:
+                    self.notice(final_message)
 
         def action_add_source(self):
             if not self.busy:
