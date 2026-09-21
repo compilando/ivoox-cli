@@ -92,8 +92,8 @@ test: ## Verificación REAL aislada; URLs en test.env (sin versionar)
 test-tui: ## Prueba navegación y controles con mpv real, sin red ni sonido
 	@$(UV) run --script scripts/test_tui.py
 
-lint: ## Ruff y compilación sintáctica del script
-	uvx ruff check ivx scripts
+lint: ## Ruff (reglas en ruff.toml) y compilación sintáctica del script
+	uvx ruff check .
 	$(PYTHON) -m py_compile ivx scripts/manage.py scripts/smoke.py scripts/test_tui.py
 
 clean: ## Confirma antes de borrar .part inactivos y temporales de test

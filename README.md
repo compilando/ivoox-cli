@@ -5,6 +5,23 @@ mantener una biblioteca y reproducirla con `fzf` y `mpv`. Es un script ejecutabl
 con metadatos PEP 723: `uv` prepara `requests`, `beautifulsoup4` y `textual` en un entorno
 aislado. La interfaz de terminal usa Textual. No utiliza pip global ni necesita AUR.
 
+> **Aviso.** Proyecto personal y no oficial, sin relación con iVoox. Está pensado
+> para uso privado de contenido al que ya tienes acceso. Respeta las condiciones
+> de uso de iVoox y los derechos de los autores; no redistribuyas los audios.
+> No elude restricciones de acceso ni DRM.
+
+## Instalación
+
+Requisitos: Linux, Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), `mpv`, `fzf`
+y `file` (`ffprobe` opcional). En Arch Linux `make deps` los instala con pacman.
+
+```sh
+git clone https://github.com/compilando/ivoox-cli.git
+cd ivoox-cli
+make deps                    # solo Arch; en otras distribuciones instala los paquetes a mano
+make install                 # ~/.local/bin/ivx
+```
+
 ## Biblioteca interactiva
 
 ```sh
@@ -185,8 +202,7 @@ sin crear la biblioteca. Añade tus programas con `make add URL=...`.
 ## Verificación real
 
 ```sh
-# test.env ya está preparado en esta instalación; para una copia nueva:
-cp -n test.env.example test.env
+cp -n test.env.example test.env   # URLs públicas de prueba
 make test
 make lint
 ```
@@ -256,4 +272,8 @@ son reanudables: limpiarlos descarta esa posibilidad.
 
 `make uninstall` también pide `BORRAR`, detiene/retira las unidades y elimina
 el binario instalado. Conserva la biblioteca y toda la configuración, incluidas
-las cachés. No desinstala paquetes de pacman. Nada se publica ni se sube a Git.
+las cachés. No desinstala paquetes de pacman.
+
+## Licencia
+
+[MIT](LICENSE).

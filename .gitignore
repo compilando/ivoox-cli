@@ -1,7 +1,19 @@
+# Datos locales y credenciales: nunca versionar.
 test.env
-__pycache__/
+.env
+cookies.txt
+*.cookies
+
+# Descargas parciales y temporales de ivx.
 *.part
 *.part.json
+*.tmp
+.ivx.lock
+
+# Pruebas y cachés.
 .test-runs/
 .cache/
 .ruff_cache/
+__pycache__/
+*.py[cod]
+.venv/

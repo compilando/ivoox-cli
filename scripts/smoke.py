@@ -56,7 +56,7 @@ def run_tests(urls, parent):
     report = {"urls": urls, "checks": []}
 
     def cli(library, *args, timeout=300):
-        invocation = command + ["--dir", str(library), *args]
+        invocation = [*command, "--dir", str(library), *args]
         result = subprocess.run(invocation, env=env, capture_output=True, text=True, timeout=timeout, check=False)
         with (run / "commands.log").open("a") as output:
             output.write(f"{invocation!r}\n{result.stdout}\n{result.stderr}\n")
@@ -128,7 +128,7 @@ def run_tests(urls, parent):
 
     # Interrupción real del proceso mientras recibe audio, y continuación con Range.
     library = run / "resume"
-    invocation = command + ["--dir", str(library), "get", urls["TEST_EPISODE"], "-n", "2", "--rate", "65536"]
+    invocation = [*command, "--dir", str(library), "get", urls["TEST_EPISODE"], "-n", "2", "--rate", "65536"]
     with (run / "interrupted.log").open("w") as output:
         process = subprocess.Popen(invocation, env=env, stdout=output, stderr=output, start_new_session=True)
         try:

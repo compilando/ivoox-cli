@@ -1,0 +1,13 @@
+target-version = "py311"
+line-length = 110
+# ivx es un script PEP 723 sin extensión .py.
+extend-include = ["ivx"]
+
+[lint]
+select = ["E", "F", "W", "B", "UP", "S", "SIM", "I", "RUF"]
+ignore = [
+    "E501",    # Longitud orientativa; no se parten mensajes ni comandos largos.
+    "S603",    # Se invocan mpv, fzf, file y ffprobe con listas de argumentos, sin shell.
+    "S607",
+    "RUF001",  # La interfaz usa − y – tipográficos a propósito.
+]
