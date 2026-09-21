@@ -802,7 +802,13 @@ def create_tui(args, player=None):
                 yield Static(self.podcast_title, id="archive-title", markup=False)
                 yield Static("Se descargarán todos los episodios. Puedes salir y reanudar después.",
                              classes="muted")
-                yield Static("y · continuar     n / Esc · cancelar", classes="muted")
+                with Horizontal(id="archive-actions"):
+                    yield Button("Archivar", id="archive-confirm", variant="warning")
+                    yield Button("Cancelar", id="archive-cancel")
+
+        def on_button_pressed(self, event: Button.Pressed):
+            event.stop()
+            self.dismiss(event.button.id == "archive-confirm")
 
     class LibraryTable(DataTable):
         BINDINGS = (Binding("j", "cursor_down", show=False), Binding("k", "cursor_up", show=False),
@@ -839,12 +845,14 @@ def create_tui(args, player=None):
         #timeline { height: 1; color: #a9b9cb; }
         #progress { width: 100%; height: 1; }
         Footer { background: #1b2532; }
-        AddSource { align: center middle; background: #000000 65%; }
+        AddSource, ConfirmArchive { align: center middle; background: #000000 65%; }
         #add-box { width: 72; max-width: 95%; height: 9; border: round #6ed5b1;
                    background: #1b2532; padding: 1 2; }
-        #archive-box { width: 72; max-width: 95%; height: 11; border: round #d9a441;
+        #archive-box { width: 72; max-width: 95%; height: 15; border: round #d9a441;
                        background: #1b2532; padding: 1 2; }
         #archive-title { height: 2; color: #f4d58d; text-style: bold; }
+        #archive-actions { height: 3; margin-top: 1; align-horizontal: right; }
+        #archive-actions Button { width: 16; margin-left: 1; }
         .heading { height: 2; text-style: bold; }
         .muted { color: #a9b9cb; margin-top: 1; }
         """

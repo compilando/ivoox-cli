@@ -288,7 +288,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(self.app, "cli_job") as job:
                 await pilot.press("U")
                 await pilot.pause()
-                await pilot.press("y")
+                await pilot.click("#archive-confirm")
                 await pilot.pause()
                 job.assert_called_once_with("archive", self.url)
 
