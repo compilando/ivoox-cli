@@ -1,6 +1,6 @@
 target-version = "py311"
 line-length = 110
-# ivx es un script PEP 723 sin extensión .py.
+# ivx sigue disponible como lanzador de desarrollo sin extensión .py.
 extend-include = ["ivx"]
 
 [lint]

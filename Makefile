@@ -7,19 +7,20 @@ PREFIX ?= $(HOME)/.local
 IVX_DIR ?= $(HOME)/Podcasts/ivoox
 CFG ?= $(HOME)/.config/ivx
 INTERVAL ?= 6h
-PYTHON ?= /usr/bin/python
+PYTHON ?= python3
 UV ?= uv
 export PREFIX IVX_DIR CFG INTERVAL
 export URL N J Q PLAN
 export IVX_CFG := $(CFG)
 export UV_CACHE_DIR := $(CFG)/uv-cache
 export UV_TOOL_DIR := $(CFG)/uv-tools
+export UV_TOOL_BIN_DIR := $(PREFIX)/bin
 export UV_PYTHON := $(PYTHON)
 export UV_PYTHON_DOWNLOADS := never
 export UV_NO_MANAGED_PYTHON := 1
 IVX = "$(PREFIX)/bin/ivx"
 
-.PHONY: help deps install uninstall get archive add sync sources ls play tui cookies timer-install timer-enable timer-disable timer-status logs test test-tui lint clean
+.PHONY: help deps install uninstall get archive add sync sources ls play tui cookies timer-install timer-enable timer-disable timer-status logs test test-tui lint demo demo-fallback clean
 
 help: ## Lista los objetivos y sus descripciones
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -27,8 +28,8 @@ help: ## Lista los objetivos y sus descripciones
 deps: ## Instala dependencias oficiales de Arch (idempotente)
 	sudo pacman -S --needed mpv fzf uv python file
 
-install: ## Instala ivx y precalienta su entorno uv
-	install -Dm755 ivx "$(PREFIX)/bin/ivx"
+install: ## Instala ivx como herramienta Python aislada
+	$(UV) tool install --force --from . ivoox-cli
 	install -dm700 "$(CFG)"
 	$(IVX) --help
 
@@ -90,11 +91,18 @@ test: ## Verificación REAL aislada; URLs en test.env (sin versionar)
 	@$(PYTHON) scripts/smoke.py
 
 test-tui: ## Prueba navegación y controles con mpv real, sin red ni sonido
-	@$(UV) run --script scripts/test_tui.py
+	@$(UV) run python scripts/test_tui.py
 
 lint: ## Ruff (reglas en ruff.toml) y compilación sintáctica del script
-	uvx ruff check .
-	$(PYTHON) -m py_compile ivx scripts/manage.py scripts/smoke.py scripts/test_tui.py
+	$(UV) run --group dev ruff check .
+	$(PYTHON) -m py_compile ivx src/ivoox_cli/*.py scripts/manage.py scripts/smoke.py scripts/test_tui.py
+
+demo: ## Regenera docs/demo.gif con VHS
+	@command -v vhs >/dev/null || { echo 'Falta VHS: https://github.com/charmbracelet/vhs' >&2; exit 2; }
+	@PATH="$(CURDIR)/.venv/bin:$$PATH" vhs docs/demo.tape
+
+demo-fallback: ## Regenera la demo con Textual e ImageMagick
+	@$(UV) run python docs/render_demo.py
 
 clean: ## Confirma antes de borrar .part inactivos y temporales de test
 	@$(PYTHON) scripts/manage.py clean

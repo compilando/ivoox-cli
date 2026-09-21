@@ -8,7 +8,6 @@ import argparse
 import asyncio
 import json
 import os
-import runpy
 import sys
 import tempfile
 import threading
@@ -21,7 +20,10 @@ from unittest.mock import patch
 from bs4 import BeautifulSoup
 from textual.widgets import Button, DataTable, Input, Static
 
-MODULE = runpy.run_path(str(Path(__file__).resolve().parent.parent / "ivx"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+from ivoox_cli import cli
+
+MODULE = vars(cli)
 
 
 class TuiTests(unittest.IsolatedAsyncioTestCase):
@@ -306,8 +308,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
 
         episodes = [{"id": str(i), "title": str(i)} for i in range(8)]
         with patch.dict(MODULE["download_queue"].__globals__, {"download": fake_download}):
-            result = await asyncio.to_thread(
-                MODULE["download_queue"], episodes, folder, self.args.config, 2, 0, state)
+            result = MODULE["download_queue"](
+                episodes, folder, self.args.config, 2, 0, state)
         self.assertLessEqual(maximum, 2)
         self.assertEqual(result, {"downloaded": 7, "skipped": 1, "failed": 0})
         saved = json.loads(state.read_text())

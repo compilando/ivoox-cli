@@ -1,9 +1,14 @@
-# ivx
+# ivx · iVoox desde la terminal
 
-CLI de Python para descargar episodios, listas públicas y programas de iVoox,
-mantener una biblioteca y reproducirla con `fzf` y `mpv`. Es un script ejecutable
-con metadatos PEP 723: `uv` prepara `requests`, `beautifulsoup4` y `textual` en un entorno
-aislado. La interfaz de terminal usa Textual. No utiliza pip global ni necesita AUR.
+[![CI](https://github.com/compilando/ivoox-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/compilando/ivoox-cli/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Licencia MIT](https://img.shields.io/badge/licencia-MIT-green.svg)](LICENSE)
+
+Descarga, organiza, busca y reproduce podcasts de iVoox sin salir de la terminal.
+Incluye una TUI con biblioteca local, streaming, suscripciones y reanudación de
+descargas. Funciona en Linux, macOS y Windows.
+
+![Demo de ivx: búsqueda y reproducción desde la TUI](https://raw.githubusercontent.com/compilando/ivoox-cli/main/docs/demo.gif)
 
 > **Aviso.** Proyecto personal y no oficial, sin relación con iVoox. Está pensado
 > para uso privado de contenido al que ya tienes acceso. Respeta las condiciones
@@ -12,21 +17,51 @@ aislado. La interfaz de terminal usa Textual. No utiliza pip global ni necesita 
 
 ## Instalación
 
-Requisitos: Linux, Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), `mpv`, `fzf`
-y `file` (`ffprobe` opcional). En Arch Linux `make deps` los instala con pacman.
+Necesitas Python 3.11 o posterior. `mpv` reproduce el audio y `fzf` solo es
+necesario para el selector de `ivx play`; la TUI no depende de `fzf`.
+
+### Linux
 
 ```sh
-git clone https://github.com/compilando/ivoox-cli.git
-cd ivoox-cli
-make deps                    # solo Arch; en otras distribuciones instala los paquetes a mano
-make install                 # ~/.local/bin/ivx
+sudo apt install mpv fzf pipx && pipx ensurepath && pipx install ivoox-cli
 ```
+
+En Arch: `sudo pacman -S mpv fzf python-pipx && pipx install ivoox-cli`.
+
+### macOS
+
+```sh
+brew install mpv fzf pipx && pipx ensurepath && pipx install ivoox-cli
+```
+
+### Windows (PowerShell)
+
+```powershell
+winget install --id Python.Python.3.13
+winget install --id shinchiro.mpv
+winget install --id junegunn.fzf
+py -m pip install --user pipx
+py -m pipx ensurepath
+pipx install ivoox-cli
+```
+
+Reabre la terminal después de `ensurepath`. Como alternativa multiplataforma:
+
+```sh
+uv tool install ivoox-cli
+```
+
+Comprueba la instalación con `ivx --help` y abre la interfaz con `ivx tui`.
+Los datos se guardan en las carpetas nativas de configuración y música del
+sistema; `IVX_CFG` e `IVX_DIR` permiten cambiarlas.
+
+La demo está descrita como código en [`docs/demo.tape`](docs/demo.tape) y se
+regenera con `make demo` usando [VHS](https://github.com/charmbracelet/vhs).
 
 ## Biblioteca interactiva
 
 ```sh
-make install                 # actualizar el ejecutable y su entorno
-make tui
+ivx tui
 ```
 
 Una interfaz de teclado con colecciones a la izquierda, episodios a la derecha
@@ -85,27 +120,26 @@ parciales.
 La barra inferior muestra la posición absoluta y permite saltar a cualquier
 punto con un clic. El comando `ivx play` también abre los controles gráficos de
 mpv, incluida su barra de posición. Puedes usar otra biblioteca con
-`make tui IVX_DIR=/ruta/a/biblioteca`. Para trabajar sin consultar la cuenta:
+`ivx --dir /ruta/a/biblioteca tui`. Para trabajar sin consultar la cuenta:
 
 ```sh
 ivx tui --local
 ```
 
-```sh
-make test-tui                # navegación, búsqueda, alta de fuente y mpv real
-```
+Para desarrollo, `make test-tui` prueba navegación, búsqueda, alta de fuente y
+mpv real.
 
 Estas pruebas no acceden a iVoox ni a tus cookies: generan páginas y audio de
 prueba en temporales y verifican parseo de cuenta, navegación, play, pausa,
 seek, volumen, stop y cierre de mpv con salida de audio nula. `make test`
 mantiene la verificación real de descargas.
 
-## Makefile (Arch)
+## Automatización para Linux y desarrollo
 
 ```sh
 make                         # ayuda; no instala ni descarga nada
-make deps                    # sudo pacman -S --needed mpv fzf uv python file
-make install                 # ~/.local/bin/ivx; configuración privada y entorno uv
+make deps                    # dependencias del sistema en Arch
+make install                 # herramienta aislada mediante uv
 make get URL='https://www.ivoox.com/…_rf_123456_1.html' N=2 J=1
 make archive URL='https://www.ivoox.com/…_sq_f112345_1.html' PLAN=1
 make archive URL='https://www.ivoox.com/…_sq_f112345_1.html' J=2
@@ -160,9 +194,9 @@ Es seguro relanzarlo: omite los MP3 terminados y reanuda los `.part`. Conserva
 el MP3 original servido por iVoox, sin recodificar ni perder calidad; convertirlo
 a otro códec solo aumentaría tiempo o degradaría el audio.
 
-Solo `make deps` necesita sudo. La primera ejecución de uv/uvx necesita red.
-El Makefile usa `/usr/bin/python`, evita descargas de intérpretes y mantiene
-las cachés en `CFG`; `make test` usa una caché dentro del proyecto.
+Solo `make deps` necesita sudo. La primera ejecución de uv necesita red.
+El Makefile es una comodidad para Linux; la CLI instalada y su paquete son
+multiplataforma. Las cachés de sus tareas se mantienen en `CFG`.
 `ffprobe` es opcional: se usa si está disponible para confirmar el contenido
 cuando `file` devuelve un MIME genérico.
 

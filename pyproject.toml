@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ivoox-cli"
+version = "0.1.0"
+description = "Descarga, organiza y reproduce podcasts de iVoox desde la terminal"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "compilando" }]
+keywords = ["cli", "ivoox", "podcast", "terminal", "tui"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "filelock>=3.13,<4",
+  "mutagen>=1.47,<2",
+  "platformdirs>=4.2,<5",
+  "requests>=2.32,<3",
+  "textual>=6,<9",
+]
+
+[dependency-groups]
+dev = [
+  "build>=1.2,<2",
+  "hatchling>=1.27,<2",
+  "ruff>=0.13,<1",
+]
+
+[project.urls]
+Homepage = "https://github.com/compilando/ivoox-cli"
+Issues = "https://github.com/compilando/ivoox-cli/issues"
+Repository = "https://github.com/compilando/ivoox-cli"
+
+[project.scripts]
+ivx = "ivoox_cli.cli:entrypoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ivoox_cli"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE"]

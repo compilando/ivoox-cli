@@ -17,3 +17,7 @@ cookies.txt
 __pycache__/
 *.py[cod]
 .venv/
+dist/
+*.egg-info/
+.demo/
+launch/
