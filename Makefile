@@ -19,7 +19,7 @@ export UV_PYTHON_DOWNLOADS := never
 export UV_NO_MANAGED_PYTHON := 1
 IVX = "$(PREFIX)/bin/ivx"
 
-.PHONY: help deps install uninstall get add sync sources ls play cookies timer-install timer-enable timer-disable timer-status logs test lint clean
+.PHONY: help deps install uninstall get add sync sources ls play tui cookies timer-install timer-enable timer-disable timer-status logs test test-tui lint clean
 
 help: ## Lista los objetivos y sus descripciones
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -57,6 +57,9 @@ ls: ## Lista los audios descargados
 play: ## Selecciona con fzf y reproduce con mpv; filtro opcional Q=...
 	@$(IVX) play "$${Q:-}"
 
+tui: ## Abre la biblioteca interactiva con controles de reproducción
+	@$(IVX) tui
+
 cookies: ## Valida cookies Netscape de iVoox, ajusta permisos y avisa de caducadas
 	@$(PYTHON) scripts/manage.py cookies
 
@@ -81,9 +84,12 @@ logs: ## Sigue el diario del servicio de sincronización
 test: ## Verificación REAL aislada; URLs en test.env (sin versionar)
 	@$(PYTHON) scripts/smoke.py
 
+test-tui: ## Prueba navegación y controles con mpv real, sin red ni sonido
+	@$(UV) run --script scripts/test_tui.py
+
 lint: ## Ruff y compilación sintáctica del script
 	uvx ruff check ivx scripts
-	$(PYTHON) -m py_compile ivx scripts/manage.py scripts/smoke.py
+	$(PYTHON) -m py_compile ivx scripts/manage.py scripts/smoke.py scripts/test_tui.py
 
 clean: ## Confirma antes de borrar .part inactivos y temporales de test
 	@$(PYTHON) scripts/manage.py clean

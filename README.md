@@ -3,7 +3,69 @@
 CLI de Python para descargar episodios, listas públicas y programas de iVoox,
 mantener una biblioteca y reproducirla con `fzf` y `mpv`. Es un script ejecutable
 con metadatos PEP 723: `uv` prepara `requests` y `beautifulsoup4` en un entorno
-aislado. No utiliza pip global ni necesita AUR.
+aislado. La interfaz de terminal usa Textual. No utiliza pip global ni necesita AUR.
+
+## Biblioteca interactiva
+
+```sh
+make install                 # actualizar el ejecutable y su entorno
+make tui
+```
+
+Una interfaz de teclado con colecciones a la izquierda, episodios a la derecha
+y estado/progreso de reproducción abajo. Con `cookies.txt` válido carga
+automáticamente Mis listas, Escuchar más tarde, Episodios favoritos y todas las
+suscripciones de la cuenta. También incorpora las fuentes de `sources.txt` y
+los audios descargados en `IVX_DIR`.
+
+La lista de colecciones se guarda 15 minutos en
+`$(CFG)/account-collections.json` para no consultar iVoox en cada arranque.
+Pulsa `r` para actualizarla. Al abrir una colección se cargan sus 20 episodios
+visibles más recientes. `☁` identifica contenido de la cuenta, `⌂` una fuente
+local, `↓` un episodio para streaming y `●` uno descargado.
+
+| Tecla | Acción |
+| --- | --- |
+| `Tab` / `Shift+Tab` | Cambiar de panel |
+| `↑` / `↓`, `j` / `k` | Navegar |
+| `Enter` | Cargar/abrir colección o reproducir episodio |
+| `Espacio` | Pausar/reanudar; tras stop, reinicia el episodio |
+| `s` | Detener reproducción |
+| `←` / `→` | Retroceder/avanzar 10 segundos |
+| `+` / `-` | Subir/bajar volumen |
+| `n` / `p` | Siguiente/anterior en la lista seleccionada al empezar a reproducir |
+| `/` | Buscar títulos en la colección actual |
+| `Esc` | Limpiar búsqueda o volver a colecciones |
+| `a` | Añadir URL de episodio, lista o programa |
+| `u` | Descargar hasta 10 episodios de la colección seleccionada |
+| `r` | Actualizar Mis listas y Mis suscripciones desde iVoox |
+| `?` | Mostrar ayuda de teclas |
+| `q` | Salir y detener el mpv de esta interfaz |
+
+La búsqueda conserva el filtro al pulsar Enter; Esc lo quita. Los controles
+por letras no interfieren cuando escribes en un campo de texto. También
+puedes seleccionar con ratón. Se recomienda una terminal de al menos 80×24.
+
+La TUI controla una instancia propia de mpv mediante un socket privado en un
+temporal; no modifica otros reproductores ni la configuración de mpv. Un
+episodio remoto se reproduce en streaming con las cookies de iVoox. `u` lo
+descarga a la biblioteca usando el CLI en segundo plano, con los mismos
+bloqueos y reanudación. Salir durante una descarga la interrumpe y conserva los
+parciales. Puedes usar otra biblioteca con
+`make tui IVX_DIR=/ruta/a/biblioteca`. Para trabajar sin consultar la cuenta:
+
+```sh
+ivx tui --local
+```
+
+```sh
+make test-tui                # navegación, búsqueda, alta de fuente y mpv real
+```
+
+Estas pruebas no acceden a iVoox ni a tus cookies: generan páginas y audio de
+prueba en temporales y verifican parseo de cuenta, navegación, play, pausa,
+seek, volumen, stop y cierre de mpv con salida de audio nula. `make test`
+mantiene la verificación real de descargas.
 
 ## Makefile (Arch)
 

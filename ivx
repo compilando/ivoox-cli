@@ -1,11 +1,12 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["requests>=2.32,<3", "beautifulsoup4>=4.12,<5"]
+# dependencies = ["requests>=2.32,<3", "beautifulsoup4>=4.12,<5", "textual>=6,<9"]
 # ///
 """Descargas públicas de iVoox, biblioteca local y reproducción con mpv."""
 
 import argparse
+import asyncio
 import concurrent.futures
 import fcntl
 import http.cookiejar
@@ -16,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -29,6 +31,10 @@ STOP = threading.Event()
 EPISODE = re.compile(r"_rf_(\d+)_")
 KINDS = [("episode", EPISODE), ("list", re.compile(r"_bk_list_(\d+)_")),
          ("program", re.compile(r"_sq_f1(\d+)_"))]
+ACCOUNT_PATHS = {
+    "/mis-audios_hn.html": ("account-later", "Escuchar más tarde"),
+    "/audios-que-me-gustan_hc_recomendados_1.html": ("account-favorites", "Episodios favoritos"),
+}
 
 
 def log(message):
@@ -72,6 +78,99 @@ def html_page(client, url):
     if "notFound404" in response.text:
         raise ValueError(f"iVoox devuelve una página 404: {url}")
     return BeautifulSoup(response.text, "html.parser")
+
+
+def account_source(url):
+    """Valida una colección privada que iVoox enlaza desde Mi iVoox."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme not in {"https", "http"} or not (
+        host == "ivoox.com" or host.endswith(".ivoox.com")
+    ) or parts.username or parts.password:
+        raise ValueError("Se requiere una URL de colección de ivoox.com")
+    clean = urlunsplit(("https", parts.netloc, parts.path, "", ""))
+    if parts.path in ACCOUNT_PATHS:
+        key, title = ACCOUNT_PATHS[parts.path]
+        return key, title, clean
+    match = re.fullmatch(r"/[^/]*_jb_(\d+)_\d+\.html", parts.path)
+    if match:
+        return f"account-sub-{match[1]}", "Suscripción", clean
+    kind, identifier, clean = source(clean)
+    return f"{kind}-{identifier}", "Colección", clean
+
+
+def require_account_page(client, url):
+    response = client.get(url, timeout=(15, 60))
+    response.raise_for_status()
+    if "/login_" in urlsplit(response.url).path:
+        raise ValueError("La sesión de iVoox ha caducado; vuelve a exportar cookies.txt")
+    return BeautifulSoup(response.text, "html.parser")
+
+
+def account_collections(client, config, force=False):
+    """Obtiene listas y suscripciones de la cuenta, con caché sin credenciales."""
+    cache = config / "account-collections.json"
+    if not force and cache.exists() and time.time() - cache.stat().st_mtime < 900:
+        try:
+            data = json.loads(cache.read_text())
+            if isinstance(data, list):
+                cache.chmod(0o600)
+                return data
+        except (OSError, ValueError):
+            pass
+    lists_url = "https://www.ivoox.com/mis-listas_hk.html"
+    lists_page = require_account_page(client, lists_url)
+    if not lists_page.select_one("#myListAudios"):
+        raise ValueError("iVoox no mostró Mis listas; vuelve a exportar cookies.txt")
+    found = {}
+    for card in lists_page.select("#myListAudios .modulo-type-lista"):
+        anchor = next((a for a in card.select("a[href]")
+                       if "_bk_list_" in a["href"] or urlsplit(urljoin(lists_url, a["href"])).path in ACCOUNT_PATHS), None)
+        if not anchor:
+            continue
+        url = urljoin(lists_url, anchor["href"]).split("?")[0]
+        key, fallback, url = account_source(url)
+        title_node = card.select_one(".title-wrapper")
+        title = (title_node or anchor).get_text(" ", strip=True) or fallback
+        found[key] = {"key": key, "title": title, "url": url, "account": True,
+                      "episodes": [], "loaded": False}
+    time.sleep(1.0)
+    subscriptions_url = "https://www.ivoox.com/gestionar-suscripciones_je.html"
+    subscriptions_page = require_account_page(client, subscriptions_url)
+    anchors = subscriptions_page.select('#main a.title[href*="_jb_"]')
+    if not anchors:
+        raise ValueError("iVoox no mostró Mis suscripciones; vuelve a exportar cookies.txt")
+    for anchor in anchors:
+        url = urljoin(subscriptions_url, anchor["href"]).split("?")[0]
+        key, _, url = account_source(url)
+        found[key] = {"key": key, "title": anchor.get_text(" ", strip=True), "url": url,
+                      "account": True, "episodes": [], "loaded": False}
+    result = sorted(found.values(), key=lambda item: item["title"].casefold())
+    config.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_json(cache, result)
+    cache.chmod(0o600)
+    return result
+
+
+def account_episodes(client, url, limit=20):
+    """Lee la primera tanda visible de una colección privada."""
+    account_source(url)
+    soup = require_account_page(client, url)
+    anchors = soup.select('#suscriptions a.title[href*="_rf_"]')
+    if not anchors:
+        scope = soup.select_one("#listenLater, #myFavouriteAudios") or soup
+        anchors = scope.select('.modulo-type-episodio h2 a[href*="_rf_"], '
+                               '.modulo-type-episodio .title-wrapper a[href*="_rf_"]')
+    episodes = {}
+    for anchor in anchors:
+        link = urljoin(url, anchor["href"]).split("#")[0].split("?")[0]
+        match = EPISODE.search(link)
+        if match:
+            title = anchor.get_text(" ", strip=True) or f"Episodio {match[1]}"
+            episodes.setdefault(match[1], {"id": match[1], "url": link, "title": title})
+        if limit and len(episodes) >= limit:
+            break
+    return list(episodes.values())
 
 
 def page_episodes(soup, url, kind):
@@ -290,12 +389,23 @@ def write_playlist(folder):
 
 
 def get(args, url):
-    kind, identifier, _ = source(url)
-    folder = args.directory / f"{kind}-{identifier}"
+    try:
+        kind, identifier, _ = source(url)
+    except ValueError as public_error:
+        try:
+            key, _, url = account_source(url)
+        except ValueError:
+            raise public_error from None
+        with session(args.config) as client:
+            episodes = account_episodes(client, url, args.n)
+        method, pages = "account", 1
+    else:
+        key = f"{kind}-{identifier}"
+        with session(args.config) as client:
+            episodes, method, pages = discover(client, url, args.n, args.no_rss,
+                                               delay=args.delay)
+    folder = args.directory / key
     folder.mkdir(parents=True, exist_ok=True)
-    with session(args.config) as client:
-        episodes, method, pages = discover(client, url, args.n, args.no_rss,
-                                           delay=args.delay)
     if not episodes:
         raise ValueError("No se encontraron episodios")
     downloaded = failed = 0
@@ -321,6 +431,562 @@ def positive(value):
     return value
 
 
+class MpvPlayer:
+    """Un mpv propio, controlado por IPC local; nunca toca otros reproductores."""
+
+    def __init__(self, audio_output=None, cookies_file=None):
+        self.audio_output = audio_output
+        self.cookies_file = cookies_file
+        self.process = None
+        self.temporary = None
+        self.socket = None
+        self.start_lock = asyncio.Lock()
+
+    async def start(self):
+        async with self.start_lock:
+            if self.process and self.process.returncode is None:
+                return
+            await self.close()
+            self.temporary = tempfile.TemporaryDirectory(prefix="ivx-player-")
+            self.socket = str(Path(self.temporary.name) / "mpv.sock")
+            command = ["mpv", "--no-config", "--no-video", "--idle=yes", "--terminal=no",
+                       "--no-resume-playback", f"--input-ipc-server={self.socket}"]
+            if self.cookies_file and Path(self.cookies_file).is_file():
+                command.extend(["--cookies=yes", f"--cookies-file={self.cookies_file}"])
+            if self.audio_output:
+                command.append(f"--ao={self.audio_output}")
+            self.process = await asyncio.create_subprocess_exec(
+                *command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(100):
+                if Path(self.socket).exists():
+                    return
+                if self.process.returncode is not None:
+                    break
+                await asyncio.sleep(0.05)
+            await self.close()
+            raise OSError("No se pudo iniciar mpv; comprueba make deps")
+
+    async def command(self, *command):
+        if not self.process or self.process.returncode is not None:
+            raise OSError("El reproductor no está iniciado; selecciona un episodio")
+        async with asyncio.timeout(2):
+            reader, writer = await asyncio.open_unix_connection(self.socket)
+            try:
+                writer.write((json.dumps({"command": command, "request_id": 1}) + "\n").encode())
+                await writer.drain()
+                while line := await reader.readline():
+                    result = json.loads(line)
+                    if result.get("request_id") == 1:
+                        if result.get("error") != "success":
+                            raise ValueError(f'mpv: {result.get("error", "error desconocido")}')
+                        return result.get("data")
+                raise OSError("Se cerró la conexión con mpv")
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+    async def play(self, path):
+        await self.start()
+        target = str(path)
+        if not target.startswith(("https://", "http://")):
+            target = str(Path(target).resolve())
+        await self.command("loadfile", target, "replace")
+        await self.command("set_property", "pause", False)
+
+    async def close(self):
+        if self.process and self.process.returncode is None:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), 3)
+            except TimeoutError:
+                self.process.kill()
+                await self.process.wait()
+        self.process = None
+        if self.temporary:
+            self.temporary.cleanup()
+            self.temporary = None
+
+
+def library_collections(directory, config):
+    """Une carpetas descargadas y fuentes, sin red ni escrituras."""
+    groups = {}
+    warnings = []
+    sources = config / "sources.txt"
+    if sources.exists():
+        for line in sources.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            try:
+                kind, identifier, url = source(line.strip())
+            except ValueError:
+                warnings.append("Hay una URL no válida en sources.txt")
+                continue
+            slug = urlsplit(url).path.rsplit("/", 1)[-1].split("_")[0]
+            title = slug.removeprefix("podcast-").replace("-", " ").strip().capitalize()
+            key = f"{kind}-{identifier}"
+            groups[key] = {"key": key, "title": title or key, "url": url, "episodes": []}
+    for folder in sorted(directory.glob("*")):
+        if not folder.is_dir() or not re.fullmatch(
+            r"(?:(?:episode|list|program)-\d+|account-(?:later|favorites|sub-\d+))", folder.name
+        ):
+            continue
+        group = groups.setdefault(folder.name, {"key": folder.name, "title": folder.name,
+                                               "url": None, "episodes": []})
+        for audio in sorted(folder.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True):
+            if not audio.stat().st_size:
+                continue
+            data = {}
+            try:
+                data = json.loads(audio.with_suffix(".json").read_text())
+                title = str(data.get("title", audio.stem))
+            except (OSError, ValueError, AttributeError):
+                title = audio.stem
+                warnings.append(f"Metadatos ausentes o dañados: {audio.name}")
+            group["episodes"].append({"id": audio.stem, "path": audio.resolve(),
+                                      "url": data.get("url"),
+                                      "title": " ".join(title.splitlines())})
+        if folder.name.startswith("episode-") and group["episodes"]:
+            group["title"] = group["episodes"][0]["title"]
+    ordered = sorted(groups.values(), key=lambda g: g["title"].casefold())
+    all_episodes = [episode for group in ordered for episode in group["episodes"]]
+    return [{"key": "all", "title": "Toda la biblioteca", "url": None,
+             "episodes": all_episodes}, *ordered], warnings
+
+
+def merge_collections(local, account):
+    """Superpone colecciones de cuenta y archivos locales por ID estable."""
+    all_local, local_groups = local[0], {group["key"]: group for group in local[1:]}
+    merged = []
+    account_keys = set()
+    for remote in account:
+        account_keys.add(remote["key"])
+        group = dict(remote)
+        local_group = local_groups.get(remote["key"], {})
+        local_by_id = {episode["id"]: episode for episode in local_group.get("episodes", [])}
+        if group.get("loaded"):
+            episodes = []
+            for episode in group.get("episodes", []):
+                item = dict(episode)
+                if episode["id"] in local_by_id:
+                    item["path"] = local_by_id[episode["id"]]["path"]
+                episodes.append(item)
+            group["episodes"] = episodes
+        else:
+            group["episodes"] = list(local_group.get("episodes", []))
+        merged.append(group)
+    merged.extend(group for key, group in local_groups.items() if key not in account_keys)
+    merged.sort(key=lambda group: (not group.get("account", False), group["title"].casefold()))
+    return [all_local, *merged]
+
+
+def fetch_account_collections(config, force=False):
+    with session(config) as client:
+        return account_collections(client, config, force)
+
+
+def fetch_account_episodes(config, url, limit=20):
+    with session(config) as client:
+        return account_episodes(client, url, limit)
+
+
+def resolve_media(config, episode):
+    with session(config) as client:
+        return media_url(client, episode)
+
+
+def create_tui(args, player=None):
+    """Carga Textual solo al abrir la interfaz; mantiene ivx como script único."""
+    from rich.text import Text
+    from textual import work
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
+    from textual.widgets import DataTable, Footer, Input, ProgressBar, Static
+
+    class AddSource(ModalScreen):
+        BINDINGS = (("escape", "dismiss(None)", "Cancelar"),)
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="add-box"):
+                yield Static("Añadir una colección", classes="heading")
+                yield Input(placeholder="Pega la URL del programa o lista de iVoox", id="source-url")
+                yield Static("Enter · guardar     Esc · cancelar", classes="muted")
+
+        def on_mount(self):
+            self.query_one(Input).focus()
+
+        def on_input_submitted(self, event: Input.Submitted):
+            try:
+                source(event.value.strip())
+            except ValueError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.dismiss(event.value.strip())
+
+    class LibraryTable(DataTable):
+        BINDINGS = (Binding("j", "cursor_down", show=False), Binding("k", "cursor_up", show=False),
+                    Binding("g", "scroll_top", show=False), Binding("G", "scroll_bottom", show=False),
+                    Binding("left", "app.seek(-10)", show=False),
+                    Binding("right", "app.seek(10)", show=False))
+
+    class IvoxApp(App):
+        TITLE = "ivx"
+        ENABLE_COMMAND_PALETTE = False
+        CSS = """
+        Screen { background: #10151d; color: #dce4ee; }
+        #brand { height: 3; padding: 1 2; color: #6ed5b1; text-style: bold; }
+        #browser { height: 1fr; padding: 0 1; }
+        #collections { width: 32%; min-width: 22; height: 1fr; border: round #344355; }
+        #episode-pane { width: 1fr; margin-left: 1; }
+        #collection-title { height: 2; padding: 0 1; color: #6ed5b1; }
+        #episodes { height: 1fr; border: round #344355; }
+        DataTable:focus { border: round #6ed5b1; }
+        DataTable { overflow-x: hidden; }
+        DataTable > .datatable--cursor { background: #245447; color: #ffffff; }
+        DataTable > .datatable--header { background: #1b2532; color: #8facc4; }
+        #search { display: none; margin: 0 1; height: 3; }
+        #search.visible { display: block; }
+        #notice { height: 2; padding: 0 2; color: #a9b9cb; }
+        #player { height: 5; margin: 0 1; padding: 0 1; border: round #344355; }
+        #now-playing { height: 1; }
+        #timeline { height: 1; color: #a9b9cb; }
+        #progress { width: 100%; height: 1; }
+        Footer { background: #1b2532; }
+        AddSource { align: center middle; background: #000000 65%; }
+        #add-box { width: 72; max-width: 95%; height: 9; border: round #6ed5b1;
+                   background: #1b2532; padding: 1 2; }
+        .heading { height: 2; text-style: bold; }
+        .muted { color: #a9b9cb; margin-top: 1; }
+        """
+        BINDINGS = (
+            Binding("space", "pause", "Play/pausa"), Binding("s", "stop", "Stop"),
+            Binding("n", "next_episode", "Siguiente", show=False),
+            Binding("p", "previous_episode", "Anterior", show=False),
+            Binding("left", "seek(-10)", "−10 s", show=False),
+            Binding("right", "seek(10)", "+10 s", show=False),
+            Binding("minus", "volume(-5)", "Vol −", show=False),
+            Binding("plus,equals", "volume(5)", "Vol +", show=False),
+            Binding("slash", "search", "Buscar"), Binding("escape", "back", "Volver", show=False),
+            Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar"),
+            Binding("r", "refresh_account", "Mi iVoox"),
+            Binding("question_mark", "help", "Ayuda"), Binding("q", "quit", "Salir"),
+        )
+
+        def __init__(self):
+            super().__init__()
+            self.player = player or MpvPlayer(cookies_file=args.config / "cookies.txt")
+            self.groups = []
+            self.account_groups = []
+            self.group_key = "all"
+            self.visible_episodes = []
+            self.queue = []
+            self.queue_index = -1
+            self.now_title = "Nada en reproducción"
+            self.job = None
+            self.busy = False
+            self.stopped = True
+            self.closed = False
+
+        def compose(self) -> ComposeResult:
+            yield Static("ivx  /  Tu biblioteca de podcasts", id="brand")
+            with Horizontal(id="browser"):
+                yield LibraryTable(id="collections", cursor_type="row", show_row_labels=False)
+                with Vertical(id="episode-pane"):
+                    yield Static("Toda la biblioteca", id="collection-title", markup=False)
+                    yield LibraryTable(id="episodes", cursor_type="row", show_row_labels=False)
+            yield Input(placeholder="Filtrar episodios…  Enter: volver a la lista · Esc: limpiar", id="search")
+            yield Static("Tab cambia de panel · ↑↓ / j k navegan · Enter reproduce", id="notice", markup=False)
+            with Vertical(id="player"):
+                yield Static("■  Nada en reproducción", id="now-playing", markup=False)
+                yield Static("00:00 / 00:00", id="timeline", markup=False)
+                yield ProgressBar(total=100, show_eta=False, show_percentage=False, id="progress")
+            yield Footer()
+
+        def on_mount(self):
+            self.query_one("#collections", DataTable).add_column("Audios · Colección")
+            self.query_one("#episodes", DataTable).add_column("Episodios")
+            self.action_refresh_library()
+            self.query_one("#collections").focus()
+            self.set_interval(0.5, self.update_player)
+            if not getattr(args, "local_only", False):
+                self.load_account_collections()
+
+        def notice(self, message):
+            self.query_one("#notice", Static).update(message)
+
+        def action_refresh_library(self):
+            try:
+                local, warnings = library_collections(args.directory, args.config)
+                self.groups = merge_collections(local, self.account_groups)
+            except OSError as exc:
+                self.notice(f"No se puede leer la biblioteca: {exc}")
+                return
+            table = self.query_one("#collections", DataTable)
+            selected = next((i for i, g in enumerate(self.groups) if g["key"] == self.group_key), 0)
+            with table.prevent(DataTable.RowHighlighted):
+                table.clear()
+                for group in self.groups:
+                    count = str(len(group["episodes"])) if group.get("loaded") or not group.get("account") else "…"
+                    marker = "☁" if group.get("account") else "⌂"
+                    table.add_row(Text(f'{marker} {count} · {group["title"]}'), key=group["key"])
+                table.move_cursor(row=selected)
+            self.group_key = self.groups[selected]["key"]
+            self.show_episodes()
+            if warnings:
+                self.notice(warnings[0])
+
+        def show_episodes(self):
+            group = next((g for g in self.groups if g["key"] == self.group_key), None)
+            if not group:
+                return
+            query = self.query_one("#search", Input).value.casefold()
+            self.visible_episodes = [e for e in group["episodes"] if query in e["title"].casefold()]
+            table = self.query_one("#episodes", DataTable)
+            table.clear()
+            for index, episode in enumerate(self.visible_episodes):
+                marker = "●" if episode.get("path") else "↓"
+                table.add_row(Text(f'{marker}  {episode["title"]}'), key=str(index))
+            self.query_one("#collection-title", Static).update(group["title"])
+            if not group["episodes"]:
+                if group.get("account") and not group.get("loaded"):
+                    self.notice("Colección de tu cuenta · Enter carga sus episodios")
+                else:
+                    self.notice("Sin audios. Pulsa u para descargar esta fuente." if group["url"] else
+                                "Biblioteca vacía. Pulsa a para añadir una URL de iVoox.")
+            elif not self.visible_episodes:
+                self.notice("Ningún episodio coincide con la búsqueda. Esc limpia el filtro.")
+            else:
+                self.notice(f"{len(self.visible_episodes)} episodios · Enter reproduce · Tab cambia de panel")
+
+        def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+            if event.data_table.id == "collections" and event.row_key.value:
+                self.group_key = event.row_key.value
+                self.show_episodes()
+
+        async def on_data_table_row_selected(self, event: DataTable.RowSelected):
+            if event.data_table.id == "collections":
+                group = next((g for g in self.groups if g["key"] == self.group_key), None)
+                if group and group.get("account") and not group.get("loaded"):
+                    self.load_account_episodes(group["key"])
+                else:
+                    self.query_one("#episodes").focus()
+            elif self.visible_episodes:
+                self.queue = self.visible_episodes.copy()
+                self.queue_index = event.cursor_row
+                await self.play_current()
+
+        async def play_current(self):
+            if not 0 <= self.queue_index < len(self.queue):
+                return
+            episode = self.queue[self.queue_index]
+            try:
+                target = episode.get("path")
+                if not target:
+                    self.notice("Preparando streaming con tu sesión de iVoox…")
+                    target = await asyncio.to_thread(resolve_media, args.config, episode)
+                await self.player.play(target)
+                self.now_title = episode["title"]
+                self.stopped = False
+                self.notice("Espacio pausa · s detiene · ←/→ salta 10 s · n/p cambia de episodio")
+            except (OSError, ValueError) as exc:
+                self.notice(f"No se pudo reproducir: {exc}")
+
+        async def control(self, *command):
+            try:
+                return await self.player.command(*command)
+            except (OSError, ValueError) as exc:
+                self.notice(str(exc))
+                return None
+
+        async def action_pause(self):
+            if self.stopped and self.queue:
+                await self.play_current()
+            elif self.player.process:
+                await self.control("cycle", "pause")
+            else:
+                self.notice("Selecciona un episodio y pulsa Enter para reproducir")
+
+        async def action_stop(self):
+            self.stopped = True
+            if self.player.process:
+                await self.control("stop")
+            self.query_one("#now-playing", Static).update("■  Reproducción detenida")
+            self.query_one("#timeline", Static).update("00:00 / 00:00")
+            self.query_one("#progress", ProgressBar).update(progress=0)
+
+        async def action_seek(self, seconds):
+            if not self.stopped:
+                await self.control("seek", seconds, "relative")
+
+        async def action_volume(self, delta):
+            if self.player.process:
+                volume = await self.control("get_property", "volume")
+                if volume is not None:
+                    await self.control("set_property", "volume", max(0, min(100, volume + delta)))
+
+        async def action_next_episode(self):
+            if self.queue_index + 1 < len(self.queue):
+                self.queue_index += 1
+                await self.play_current()
+            else:
+                self.notice("Fin de la lista de reproducción")
+
+        async def action_previous_episode(self):
+            if self.queue_index > 0:
+                self.queue_index -= 1
+                await self.play_current()
+
+        async def update_player(self):
+            if not self.player.process or self.stopped or self.closed:
+                return
+            try:
+                idle = await self.player.command("get_property", "idle-active")
+                if idle:
+                    self.stopped = True
+                    self.query_one("#now-playing", Static).update("■  Finalizado · " + self.now_title)
+                    return
+                position, duration, paused, volume = await asyncio.gather(*(
+                    self.player.command("get_property", prop)
+                    for prop in ("time-pos", "duration", "pause", "volume")))
+                position, duration = position or 0, duration or 0
+                symbol = "Ⅱ" if paused else "▶"
+                self.query_one("#now-playing", Static).update(f"{symbol}  {self.now_title}")
+                def clock(seconds):
+                    minutes, seconds = divmod(int(seconds), 60)
+                    return f"{minutes:02d}:{seconds:02d}"
+                self.query_one("#timeline", Static).update(
+                    f"{clock(position)} / {clock(duration)}     Volumen {volume:.0f}%")
+                self.query_one("#progress", ProgressBar).update(total=max(duration, 1), progress=position)
+            except ValueError:
+                pass  # Las propiedades no están disponibles durante loadfile.
+            except OSError:
+                self.stopped = True
+                self.notice("Se ha cerrado mpv. Pulsa Enter para volver a reproducir.")
+
+        def action_search(self):
+            field = self.query_one("#search", Input)
+            field.add_class("visible")
+            field.focus()
+
+        def on_input_changed(self, event: Input.Changed):
+            if event.input.id == "search":
+                self.show_episodes()
+
+        def on_input_submitted(self, event: Input.Submitted):
+            if event.input.id == "search":
+                self.query_one("#episodes").focus()
+
+        def action_back(self):
+            field = self.query_one("#search", Input)
+            if field.has_class("visible"):
+                field.value = ""
+                field.remove_class("visible")
+                self.query_one("#episodes").focus()
+            else:
+                self.query_one("#collections").focus()
+
+        def action_help(self):
+            self.notify("Tab: panel · ↑↓/j k: navegar · Enter: abrir/reproducir · Espacio: pausa\n"
+                        "s: stop · ←→: ±10 s · +/−: volumen · n/p: siguiente/anterior\n"
+                        "/: buscar · a: añadir URL · u: descargar colección (10 últimos)\n"
+                        "r: actualizar Mi iVoox · Esc: volver · q: salir y detener mpv\n"
+                        "☁: cuenta · ⌂: local · ↓: streaming · ●: descargado", timeout=15)
+
+        def action_refresh_account(self):
+            if not self.busy:
+                self.load_account_collections(True)
+
+        @work(exclusive=True, group="account-collections")
+        async def load_account_collections(self, force=False):
+            self.notice("Cargando Mis listas y Mis suscripciones de iVoox…")
+            try:
+                self.account_groups = await asyncio.to_thread(fetch_account_collections, args.config, force)
+                if not self.closed:
+                    self.action_refresh_library()
+                    self.notice(f"Mi iVoox: {len(self.account_groups)} colecciones · Enter abre una")
+            except (OSError, ValueError, requests.RequestException) as exc:
+                if not self.closed:
+                    self.notice(f"No se pudo cargar Mi iVoox: {exc}")
+
+        @work(exclusive=True, group="account-episodes")
+        async def load_account_episodes(self, key):
+            group = next((item for item in self.account_groups if item["key"] == key), None)
+            if not group:
+                return
+            self.notice(f'Cargando episodios de {group["title"]}…')
+            try:
+                group["episodes"] = await asyncio.to_thread(
+                    fetch_account_episodes, args.config, group["url"], 20)
+                group["loaded"] = True
+                self.group_key = key
+                self.action_refresh_library()
+                self.query_one("#episodes").focus()
+            except (OSError, ValueError, requests.RequestException) as exc:
+                self.notice(f"No se pudo abrir la colección: {exc}")
+
+        def action_add_source(self):
+            if not self.busy:
+                self.push_screen(AddSource(), self.add_source_result)
+
+        def add_source_result(self, url):
+            if url:
+                self.cli_job("add", url)
+
+        def action_sync_source(self):
+            group = next((g for g in self.groups if g["key"] == self.group_key), None)
+            if self.busy:
+                self.notice("Ya hay una operación en curso")
+            elif group and group["url"]:
+                self.cli_job("get", group["url"], "-n", "10")
+            else:
+                self.notice("Selecciona una fuente añadida con a para descargar sus episodios")
+
+        @work(exclusive=True, group="cli")
+        async def cli_job(self, *arguments):
+            self.busy = True
+            self.notice("Guardando fuente…" if arguments[0] == "add" else
+                        "Descargando hasta 10 episodios… puedes seguir navegando y escuchando")
+            try:
+                self.job = await asyncio.create_subprocess_exec(
+                    sys.executable, str(Path(__file__).resolve()), "--dir", str(args.directory),
+                    "--config", str(args.config), *arguments,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                stdout, stderr = await self.job.communicate()
+                if not self.closed:
+                    self.action_refresh_library()
+                    if self.job.returncode:
+                        self.notice("La operación falló; los parciales se conservan. Consulta make get/sync.")
+                        self.notify(stderr.decode(errors="replace")[-1000:], severity="error", timeout=10)
+                    elif arguments[0] == "get":
+                        result = json.loads(stdout.decode().splitlines()[-1])
+                        self.notice(f'Descargados: {result["downloaded"]} · Ya guardados: {result["skipped"]}')
+                    else:
+                        kind, identifier, _ = source(arguments[1])
+                        self.group_key = f"{kind}-{identifier}"
+                        self.action_refresh_library()
+                        self.notice("Fuente añadida. Pulsa u para descargar sus últimos episodios.")
+            except (OSError, ValueError) as exc:
+                if not self.closed:
+                    self.notice(f"No se pudo completar la operación: {exc}")
+            finally:
+                if self.job and self.job.returncode is None:
+                    self.job.terminate()
+                    try:
+                        await asyncio.wait_for(self.job.wait(), 5)
+                    except TimeoutError:
+                        self.job.kill()
+                        await self.job.wait()
+                self.job = None
+                self.busy = False
+
+        async def on_unmount(self):
+            self.closed = True
+            await self.player.close()
+
+    return IvoxApp()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dir", dest="directory", type=Path,
@@ -342,7 +1008,15 @@ def main():
     commands.add_parser("add").add_argument("url")
     commands.add_parser("ls")
     commands.add_parser("play").add_argument("query", nargs="?", default="")
+    tui = commands.add_parser("tui", help="colecciones de la cuenta y reproducción con mpv")
+    tui.add_argument("--local", dest="local_only", action="store_true",
+                     help="no consultar las colecciones de la cuenta")
     args = parser.parse_args()
+    if args.command == "tui":
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise ValueError("Abre ivx tui desde una terminal interactiva")
+        create_tui(args).run()
+        return 0
     if args.command == "inspect":
         with session(args.config) as client:
             items, method, pages = discover(client, args.url, args.n, args.no_rss,
