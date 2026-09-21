@@ -7,6 +7,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import http.cookiejar
 import json
@@ -654,16 +655,24 @@ class MpvPlayer:
 
     async def close(self):
         if self.process and self.process.returncode is None:
-            self.process.terminate()
+            # Deja que mpv cierre audio, IPC y estado interno antes de recurrir
+            # a señales; algunos backends necesitan ese cierre ordenado.
+            with contextlib.suppress(OSError, ValueError, TimeoutError):
+                await self.command("quit")
             try:
-                await asyncio.wait_for(self.process.wait(), 3)
+                await asyncio.wait_for(self.process.wait(), 2)
             except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+                self.process.terminate()
+                try:
+                    await asyncio.wait_for(self.process.wait(), 3)
+                except TimeoutError:
+                    self.process.kill()
+                    await self.process.wait()
         self.process = None
         if self.temporary:
             self.temporary.cleanup()
             self.temporary = None
+        self.socket = None
 
 
 def library_collections(directory, config):
@@ -762,10 +771,11 @@ def resolve_media(config, episode):
 def create_tui(args, player=None):
     """Carga Textual solo al abrir la interfaz; mantiene ivx como script único."""
     from rich.text import Text
-    from textual import work
+    from textual import events, work
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, Vertical
+    from textual.message import Message
     from textual.screen import ModalScreen
     from textual.widgets import Button, DataTable, Footer, Input, ProgressBar, Static
 
@@ -817,6 +827,20 @@ def create_tui(args, player=None):
                     Binding("left", "app.seek(-10)", show=False),
                     Binding("right", "app.seek(10)", show=False))
 
+    class PlaybackBar(ProgressBar):
+        """Barra de progreso que solicita un seek absoluto al hacer clic."""
+
+        class Seek(Message):
+            def __init__(self, fraction):
+                super().__init__()
+                self.fraction = fraction
+
+        def on_click(self, event: events.Click):
+            if event.button == 1 and self.size.width:
+                fraction = max(0.0, min(1.0, event.x / max(1, self.size.width - 1)))
+                self.post_message(self.Seek(fraction))
+                event.stop()
+
     class IvoxApp(App):
         TITLE = "ivx"
         ENABLE_COMMAND_PALETTE = False
@@ -845,6 +869,7 @@ def create_tui(args, player=None):
         #now-playing { height: 1; }
         #timeline { height: 1; color: #a9b9cb; }
         #progress { width: 100%; height: 1; }
+        #progress:hover { background: #1b2532; }
         Footer { background: #1b2532; }
         AddSource, ConfirmArchive { align: center middle; background: #000000 65%; }
         #add-box { width: 72; max-width: 95%; height: 9; border: round #6ed5b1;
@@ -863,6 +888,19 @@ def create_tui(args, player=None):
             Binding("p", "previous_episode", "Anterior", show=False),
             Binding("left", "seek(-10)", "−10 s", show=False),
             Binding("right", "seek(10)", "+10 s", show=False),
+            Binding("shift+left", "seek(-60)", "−1 min", show=False),
+            Binding("shift+right", "seek(60)", "+1 min", show=False),
+            Binding("home", "seek_percent(0)", "Inicio", show=False),
+            Binding("0", "seek_percent(0)", "0%", show=False),
+            Binding("1", "seek_percent(10)", "10%", show=False),
+            Binding("2", "seek_percent(20)", "20%", show=False),
+            Binding("3", "seek_percent(30)", "30%", show=False),
+            Binding("4", "seek_percent(40)", "40%", show=False),
+            Binding("5", "seek_percent(50)", "50%", show=False),
+            Binding("6", "seek_percent(60)", "60%", show=False),
+            Binding("7", "seek_percent(70)", "70%", show=False),
+            Binding("8", "seek_percent(80)", "80%", show=False),
+            Binding("9", "seek_percent(90)", "90%", show=False),
             Binding("minus", "volume(-5)", "Vol −", show=False),
             Binding("plus,equals", "volume(5)", "Vol +", show=False),
             Binding("slash", "search", "Buscar"), Binding("escape", "back", "Volver", show=False),
@@ -891,6 +929,7 @@ def create_tui(args, player=None):
             self.job = None
             self.busy = False
             self.stopped = True
+            self.player_duration = 0
             self.closed = False
 
         def compose(self) -> ComposeResult:
@@ -910,7 +949,7 @@ def create_tui(args, player=None):
             with Vertical(id="player"):
                 yield Static("■  Nada en reproducción", id="now-playing", markup=False)
                 yield Static("00:00 / 00:00", id="timeline", markup=False)
-                yield ProgressBar(total=100, show_eta=False, show_percentage=False, id="progress")
+                yield PlaybackBar(total=100, show_eta=False, show_percentage=False, id="progress")
             yield Footer()
 
         def on_mount(self):
@@ -1058,7 +1097,7 @@ def create_tui(args, player=None):
                 await self.player.play(target)
                 self.now_title = episode["title"]
                 self.stopped = False
-                self.notice("Espacio pausa · s detiene · ←/→ salta 10 s · n/p cambia de episodio")
+                self.notice("Espacio pausa · ←/→ ±10 s · Mayús+←/→ ±1 min · clic en barra: ir")
             except (OSError, ValueError) as exc:
                 self.notice(f"No se pudo reproducir: {exc}")
 
@@ -1079,6 +1118,7 @@ def create_tui(args, player=None):
 
         async def action_stop(self):
             self.stopped = True
+            self.player_duration = 0
             if self.player.process:
                 await self.control("stop")
             self.query_one("#now-playing", Static).update("■  Reproducción detenida")
@@ -1088,6 +1128,13 @@ def create_tui(args, player=None):
         async def action_seek(self, seconds):
             if not self.stopped:
                 await self.control("seek", seconds, "relative")
+
+        async def action_seek_percent(self, percent):
+            if not self.stopped and self.player_duration > 0:
+                await self.control("seek", max(0, min(100, percent)), "absolute-percent")
+
+        async def on_playback_bar_seek(self, event: PlaybackBar.Seek):
+            await self.action_seek_percent(event.fraction * 100)
 
         async def action_volume(self, delta):
             if self.player.process:
@@ -1120,6 +1167,7 @@ def create_tui(args, player=None):
                     self.player.command("get_property", prop)
                     for prop in ("time-pos", "duration", "pause", "volume")))
                 position, duration = position or 0, duration or 0
+                self.player_duration = duration
                 symbol = "Ⅱ" if paused else "▶"
                 self.query_one("#now-playing", Static).update(f"{symbol}  {self.now_title}")
                 def clock(seconds):
@@ -1173,7 +1221,8 @@ def create_tui(args, player=None):
 
         def action_help(self):
             self.notify("Tab: panel · ↑↓/j k: navegar · Enter: abrir/reproducir · Espacio: pausa\n"
-                        "s: stop · ←→: ±10 s · +/−: volumen · n/p: siguiente/anterior\n"
+                        "s: stop · ←→: ±10 s · Mayús+←→: ±1 min · 0–9: posición absoluta\n"
+                        "clic en la barra: ir a esa posición · n/p: siguiente/anterior\n"
                         "/: buscar en el panel · f: filtrar podcasts · a: añadir URL\n"
                         "u: descargar colección (10 últimos)\n"
                         "o: ordenar por fecha descendente/ascendente o título\n"
@@ -1362,18 +1411,23 @@ def create_tui(args, player=None):
                 if not self.closed:
                     self.notice(f"No se pudo completar la operación: {exc}")
             finally:
-                if self.job and self.job.returncode is None:
-                    self.job.terminate()
-                    try:
-                        await asyncio.wait_for(self.job.wait(), 5)
-                    except TimeoutError:
-                        self.job.kill()
-                        await self.job.wait()
-                self.job = None
+                await self.stop_cli_job()
                 self.busy = False
+
+        async def stop_cli_job(self):
+            """Detiene una descarga hija y le da tiempo para conservar su parcial."""
+            job, self.job = self.job, None
+            if job and job.returncode is None:
+                job.terminate()
+                try:
+                    await asyncio.wait_for(job.wait(), 5)
+                except TimeoutError:
+                    job.kill()
+                    await job.wait()
 
         async def on_unmount(self):
             self.closed = True
+            await self.stop_cli_job()
             await self.player.close()
 
     return IvoxApp()
@@ -1455,7 +1509,7 @@ def main():
         if selected.returncode in {1, 130}:
             return 0
         selected.check_returncode()
-        return subprocess.call(["mpv", "--no-video", "--"] +
+        return subprocess.call(["mpv", "--no-video", "--force-window=yes", "--osc=yes", "--"] +
                                [line.split("\t")[-1] for line in selected.stdout.splitlines()])
     sources = args.config / "sources.txt"
     if args.command == "sync" and not sources.exists():

@@ -52,6 +52,8 @@ contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming
 | `Espacio` | Pausar/reanudar; tras stop, reinicia el episodio |
 | `s` | Detener reproducción |
 | `←` / `→` | Retroceder/avanzar 10 segundos |
+| `Shift+←` / `Shift+→` | Retroceder/avanzar 1 minuto |
+| `0`–`9` | Ir a una posición absoluta (0%–90%) |
 | `+` / `-` | Subir/bajar volumen |
 | `n` / `p` | Siguiente/anterior en la lista seleccionada al empezar a reproducir |
 | `/` | Buscar en el panel activo: podcasts a la izquierda, episodios a la derecha |
@@ -78,7 +80,11 @@ temporal; no modifica otros reproductores ni la configuración de mpv. Un
 episodio remoto se reproduce en streaming con las cookies de iVoox. `u` lo
 descarga a la biblioteca usando el CLI en segundo plano, con los mismos
 bloqueos y reanudación. Salir durante una descarga la interrumpe y conserva los
-parciales. Puedes usar otra biblioteca con
+parciales.
+
+La barra inferior muestra la posición absoluta y permite saltar a cualquier
+punto con un clic. El comando `ivx play` también abre los controles gráficos de
+mpv, incluida su barra de posición. Puedes usar otra biblioteca con
 `make tui IVX_DIR=/ruta/a/biblioteca`. Para trabajar sin consultar la cuenta:
 
 ```sh

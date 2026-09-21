@@ -60,6 +60,11 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                   f"cola={self.app.queue_index}/{len(self.app.queue)}")
 
     async def test_navigation_and_real_playback(self):
+        # Duración suficiente para comprobar también saltos de un minuto.
+        audio = self.args.directory / "program-1234" / "1.mp3"
+        with wave.open(str(audio), "wb") as output:
+            output.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+            output.writeframes(b"\0\0" * 8000 * 130)
         async with self.app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             self.assertEqual(self.app.query_one("#collections", DataTable).row_count, 2)
@@ -87,6 +92,27 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             async def advanced():
                 return await self.player.command("get_property", "time-pos") >= 9
             await self.wait_until(advanced, "La flecha derecha no hizo seek")
+            async def duration_known():
+                return self.app.player_duration > 0
+            await self.wait_until(duration_known, "No se obtuvo la duración del episodio")
+            await pilot.press("5")
+            async def halfway():
+                position = await self.player.command("get_property", "time-pos")
+                return 64 <= position <= 67
+            await self.wait_until(halfway, "El seek absoluto al 50% no funcionó")
+            progress = self.app.query_one("#progress")
+            await pilot.click(progress, offset=(progress.size.width // 4, 0))
+            async def first_quarter():
+                position = await self.player.command("get_property", "time-pos")
+                return 31 <= position <= 34
+            await self.wait_until(first_quarter, "El seek absoluto con clic no funcionó")
+            await pilot.press("shift+right")
+            async def minute_forward():
+                position = await self.player.command("get_property", "time-pos")
+                return 91 <= position <= 95
+            await self.wait_until(minute_forward, "Mayús+derecha no avanzó un minuto")
+            await pilot.press("shift+left")
+            await self.wait_until(first_quarter, "Mayús+izquierda no retrocedió un minuto")
             await pilot.press("minus")
             self.assertEqual(await self.player.command("get_property", "volume"), 95)
             await pilot.press("space")
@@ -106,8 +132,11 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.app.focused.id, "source-url")
             await pilot.press("escape")
             process = self.player.process
+            player_directory = Path(self.player.temporary.name)
             await pilot.press("q")
-        self.assertIsNotNone(process.returncode, "mpv quedó huérfano al salir")
+        self.assertEqual(process.returncode, 0, "mpv no recibió un cierre ordenado")
+        self.assertFalse(player_directory.exists(), "No se retiró el temporal de mpv")
+        self.assertIsNone(self.player.socket)
 
     async def test_empty_library_small_terminal_and_add(self):
         self.args.directory = Path(self.tmp.name) / "empty"
@@ -180,6 +209,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 process = self.app.job
                 await pilot.press("q")
         self.assertIsNotNone(process.returncode, "Quedó una operación huérfana al salir")
+        self.assertIsNone(self.app.job)
+        self.assertFalse(self.app.busy)
 
     async def test_account_collection_parsing_and_merge(self):
         class Response:
