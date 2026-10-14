@@ -67,8 +67,10 @@ ivx tui
 Una interfaz de teclado con colecciones a la izquierda, episodios a la derecha
 y estado/progreso de reproducción abajo. Con `cookies.txt` válido carga
 automáticamente Mis listas, Escuchar más tarde, Episodios favoritos y todas las
-suscripciones de la cuenta. También incorpora las fuentes de `sources.txt` y
-los audios descargados en `IVX_DIR`.
+suscripciones de la cuenta. **Nuevos Episodios** reúne en una sola portada los
+episodios pendientes de todas esas suscripciones, igual que la vista de la app;
+**Toda la biblioteca** sigue siendo la opción inicial. También incorpora las
+fuentes de `sources.txt` y los audios descargados en `IVX_DIR`.
 
 La lista de colecciones se guarda 15 minutos en
 `$(CFG)/account-collections.json` para no consultar iVoox en cada arranque.

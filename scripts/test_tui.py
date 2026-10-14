@@ -242,21 +242,24 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 return Response(url, pages[name])
 
         groups = MODULE["account_collections"](Client(), self.args.config, True)
-        self.assertEqual({g["key"] for g in groups}, {"list-77", "account-later", "account-sub-88"})
+        self.assertEqual({g["key"] for g in groups},
+                         {"account-new", "list-77", "account-later", "account-sub-88"})
+        subscription = next(g for g in groups if g["key"] == "account-sub-88")
         html = BeautifulSoup('''<tbody id="suscriptions">
           <tr><td><a class="title" href="/uno-audios-mp3_rf_9_1.html">Uno</a></td><td>28/04/2015</td></tr>
           <tr><td><a class="title" href="/dos-audios-mp3_rf_8_1.html">Dos</a></td></tr>
         </tbody>''', "html.parser")
         with patch.dict(MODULE["require_account_page"].__globals__,
                         {"require_account_page": lambda c, u, ajax=False: html}):
-            episodes = MODULE["account_episodes"](Client(), groups[-1]["url"], 1)
+            episodes = MODULE["account_episodes"](Client(), subscription["url"], 1)
         self.assertEqual(episodes, [{"id": "9", "url": "https://www.ivoox.com/uno-audios-mp3_rf_9_1.html",
                                      "title": "Uno", "published": "2015-04-28"}])
-        groups[-1]["episodes"] = episodes
-        groups[-1]["loaded"] = True
+        subscription["episodes"] = episodes
+        subscription["loaded"] = True
         merged = MODULE["merge_collections"](MODULE["library_collections"](
             self.args.directory, self.args.config)[0], groups)
-        self.assertEqual(len(merged), 5)
+        self.assertEqual(len(merged), 6)
+        self.assertEqual(merged[1]["key"], "account-new")
         self.assertTrue(merged[1]["account"])
 
         initial = BeautifulSoup('''<tbody id="suscriptions" data-trigger="ajax_pagination"
@@ -276,14 +279,42 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
         clock = type("Clock", (), {"sleep": staticmethod(lambda seconds: None)})
         with patch.dict(MODULE["account_episode_page"].__globals__,
                         {"require_account_page": paged, "time": clock}):
-            paged_episodes = MODULE["account_episodes"](Client(), groups[-1]["url"], None, 0)
+            paged_episodes = MODULE["account_episodes"](Client(), subscription["url"], None, 0)
         self.assertEqual([episode["id"] for episode in paged_episodes], ["9", "8", "7"])
         self.assertEqual(requested[1],
                          ("https://www.ivoox.com/mi-podcast_jb_88_2.html", True))
 
+        latest = BeautifulSoup('''<tbody id="suscriptions" data-trigger="ajax_pagination"
+          data-href="_jb_42" data-page="2" data-href-after="?&amp;audioview=1">
+          <tr><td><a class="title" href="/nuevo-audios-mp3_rf_11_1.html">Nuevo</a></td></tr>
+          <tr class="listened"><td>
+            <a class="title" href="/escuchado-audios-mp3_rf_10_1.html">Escuchado</a>
+          </td></tr>
+        </tbody>''', "html.parser")
+        with patch.dict(MODULE["account_episode_page"].__globals__,
+                        {"require_account_page": lambda c, u, ajax=False: latest}):
+            latest_items, latest_next = MODULE["account_episode_page"](
+                Client(), "https://www.ivoox.com/suscripciones_jb.html")
+        self.assertEqual([episode["id"] for episode in latest_items], ["11"])
+        self.assertEqual(latest_next,
+                         "https://www.ivoox.com/_jb_42_2.html?&audioview=1")
+
+        pending_pages = iter([
+            ([], "https://www.ivoox.com/_jb_42_3.html?&audioview=1"),
+            ([{"id": "7", "url": "https://www.ivoox.com/nuevo_rf_7_1.html",
+               "title": "Pendiente", "published": None}], None),
+        ])
+        with patch.dict(MODULE["account_episodes"].__globals__,
+                        {"account_episode_page": lambda c, u, n=None: next(pending_pages)}):
+            pending = MODULE["account_episodes"](
+                Client(), "https://www.ivoox.com/suscripciones_jb.html", None, 0)
+        self.assertEqual([episode["id"] for episode in pending], ["7"])
+
     async def test_account_urls_are_restricted(self):
         valid = MODULE["account_source"]("https://www.ivoox.com/suscripciones_jb_123_1.html")
         self.assertEqual(valid[0], "account-sub-123")
+        latest = MODULE["account_source"]("https://www.ivoox.com/suscripciones_jb.html")
+        self.assertEqual(latest[:2], ("account-new", "Nuevos Episodios"))
         for url in ("https://example.com/suscripciones_jb_1_1.html",
                     "https://www.ivoox.com/cerrar-sesion_zs.html"):
             with self.assertRaises(ValueError):

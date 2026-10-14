@@ -34,9 +34,22 @@ EPISODE = re.compile(r"_rf_(\d+)_")
 KINDS = [("episode", EPISODE), ("list", re.compile(r"_bk_list_(\d+)_")),
          ("program", re.compile(r"_sq_f1(\d+)_"))]
 ACCOUNT_PATHS = {
+    "/suscripciones_jb.html": ("account-new", "Nuevos Episodios"),
     "/mis-audios_hn.html": ("account-later", "Escuchar más tarde"),
     "/audios-que-me-gustan_hc_recomendados_1.html": ("account-favorites", "Episodios favoritos"),
 }
+
+
+def new_episodes_group():
+    """Colección virtual equivalente a Nuevos Episodios de la app."""
+    return {
+        "key": "account-new",
+        "title": "Nuevos Episodios",
+        "url": "https://www.ivoox.com/suscripciones_jb.html",
+        "account": True,
+        "episodes": [],
+        "loaded": False,
+    }
 
 
 def publication_date(value):
@@ -154,6 +167,9 @@ def account_collections(client, config, force=False):
             data = json.loads(cache.read_text())
             if isinstance(data, list):
                 cache.chmod(0o600)
+                if not any(item.get("key") == "account-new" for item in data
+                           if isinstance(item, dict)):
+                    data.insert(0, new_episodes_group())
                 return data
         except (OSError, ValueError):
             pass
@@ -161,7 +177,8 @@ def account_collections(client, config, force=False):
     lists_page = require_account_page(client, lists_url)
     if not lists_page.select_one("#myListAudios"):
         raise ValueError("iVoox no mostró Mis listas; vuelve a exportar cookies.txt")
-    found = {}
+    latest = new_episodes_group()
+    found = {latest["key"]: latest}
     for card in lists_page.select("#myListAudios .modulo-type-lista"):
         anchor = next((a for a in card.select("a[href]")
                        if "_bk_list_" in a["href"] or urlsplit(urljoin(lists_url, a["href"])).path in ACCOUNT_PATHS), None)
@@ -202,8 +219,12 @@ def account_episode_page(client, url, next_url=None):
         anchors = scope.select('.modulo-type-episodio h2 a[href*="_rf_"], '
                                '.modulo-type-episodio .title-wrapper a[href*="_rf_"], '
                                'tr a.title[href*="_rf_"]')
+    page_size = len(anchors)
     episodes = {}
     for anchor in anchors:
+        row = anchor.find_parent("tr")
+        if urlsplit(url).path == "/suscripciones_jb.html" and row and "listened" in row.get("class", []):
+            continue
         link = urljoin(url, anchor["href"]).split("#")[0].split("?")[0]
         match = EPISODE.search(link)
         if match:
@@ -213,12 +234,16 @@ def account_episode_page(client, url, next_url=None):
     items = list(episodes.values())
     following = None
     pagination = soup.select_one('[data-trigger="ajax_pagination"][data-href][data-page]')
-    if pagination and items:
-        following = urljoin(url, f'{pagination["data-href"]}_{pagination["data-page"]}.html')
-    elif next_url and len(items) >= 20:
-        match = re.fullmatch(r"(.+_)(\d+)(\.html)(?:\?.*)?", next_url)
+    if pagination:
+        suffix = pagination.get("data-href-after", "")
+        following = urljoin(
+            url, f'{pagination["data-href"]}_{pagination["data-page"]}.html{suffix}')
+    elif next_url and page_size >= 20:
+        parts = urlsplit(next_url)
+        match = re.fullmatch(r"(.+_)(\d+)(\.html)", parts.path)
         if match:
-            following = f"{match[1]}{int(match[2]) + 1}{match[3]}"
+            path = f"{match[1]}{int(match[2]) + 1}{match[3]}"
+            following = urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
     if following:
         parts = urlsplit(following)
         host = parts.hostname or ""
@@ -244,6 +269,8 @@ def account_episodes(client, url, limit=20, delay=1.0):
         items, next_url = account_episode_page(client, url, next_url)
         first = False
         if not items:
+            if next_url:
+                continue
             break
         added = 0
         for episode in items:
@@ -253,6 +280,8 @@ def account_episodes(client, url, limit=20, delay=1.0):
             if limit and len(episodes) >= limit:
                 return list(episodes.values())
         if not added:
+            if next_url and next_url != page_url:
+                continue
             break
     return list(episodes.values())
 
@@ -732,7 +761,7 @@ def library_collections(directory, config):
             groups[key] = {"key": key, "title": title or key, "url": url, "episodes": []}
     for folder in sorted(directory.glob("*")):
         if not folder.is_dir() or not re.fullmatch(
-            r"(?:(?:episode|list|program)-\d+|account-(?:later|favorites|sub-\d+))", folder.name
+            r"(?:(?:episode|list|program)-\d+|account-(?:new|later|favorites|sub-\d+))", folder.name
         ):
             continue
         group = groups.setdefault(folder.name, {"key": folder.name, "title": folder.name,
@@ -781,7 +810,11 @@ def merge_collections(local, account):
             group["episodes"] = list(local_group.get("episodes", []))
         merged.append(group)
     merged.extend(group for key, group in local_groups.items() if key not in account_keys)
-    merged.sort(key=lambda group: (not group.get("account", False), group["title"].casefold()))
+    merged.sort(key=lambda group: (
+        not group.get("account", False),
+        group.get("key") != "account-new",
+        group["title"].casefold(),
+    ))
     return [all_local, *merged]
 
 
@@ -1297,15 +1330,16 @@ def create_tui(args, player=None):
             row = self.query_one("#episodes", DataTable).cursor_row
             self.notice(f'{"Cargando más" if more else "Cargando"} episodios de {group["title"]}…')
             try:
+                requested_url = group.get("next_url") if more else None
                 items, next_url = await asyncio.to_thread(
                     fetch_account_episode_page, args.config, group["url"],
-                    group.get("next_url") if more else None)
+                    requested_url)
                 if more:
                     existing = {episode["id"]: episode for episode in group["episodes"]}
                     previous = len(existing)
                     existing.update({episode["id"]: episode for episode in items})
                     group["episodes"] = list(existing.values())
-                    if len(existing) == previous:
+                    if len(existing) == previous and next_url == requested_url:
                         next_url = None
                 else:
                     group["episodes"] = items
@@ -1353,8 +1387,8 @@ def create_tui(args, player=None):
             final_message = None
             try:
                 while group.get("next_url"):
-                    call = (fetch_account_episode_page, args.config, group["url"],
-                            group["next_url"])
+                    requested_url = group["next_url"]
+                    call = (fetch_account_episode_page, args.config, group["url"], requested_url)
                     if getattr(args, "local_only", False):
                         items, next_url = call[0](*call[1:])
                     else:
@@ -1363,7 +1397,8 @@ def create_tui(args, player=None):
                     previous = len(existing)
                     existing.update({episode["id"]: episode for episode in items})
                     group["episodes"] = list(existing.values())
-                    group["next_url"] = next_url if len(existing) > previous else None
+                    advanced = next_url and next_url != requested_url
+                    group["next_url"] = next_url if len(existing) > previous or advanced else None
                     group["loaded"] = True
                     pages += 1
                     self.action_refresh_library()
