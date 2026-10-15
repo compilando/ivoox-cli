@@ -81,6 +81,18 @@ def node_publication_date(node):
     return publication_date(scope.get_text(" ", strip=True))
 
 
+def node_podcast_title(node):
+    """Extrae el programa de una fila de la vista agregada de suscripciones."""
+    details = node.find_next_sibling("p")
+    if not details:
+        return None
+    direct_text = "".join(str(value) for value in details.find_all(string=True, recursive=False))
+    direct_text = " ".join(direct_text.split())
+    parts = re.split(
+        r"\s+\.\s+(?=\d{1,2}(?::\d{2}){1,2}\s+mins\b)", direct_text, maxsplit=1)
+    return parts[0].strip() if len(parts) == 2 and parts[0].strip() else None
+
+
 def log(message):
     print(message, file=sys.stderr, flush=True)
 
@@ -229,8 +241,11 @@ def account_episode_page(client, url, next_url=None):
         match = EPISODE.search(link)
         if match:
             title = anchor.get_text(" ", strip=True) or f"Episodio {match[1]}"
-            episodes.setdefault(match[1], {"id": match[1], "url": link, "title": title,
-                                           "published": node_publication_date(anchor)})
+            episode = {"id": match[1], "url": link, "title": title,
+                       "published": node_publication_date(anchor)}
+            if urlsplit(url).path == "/suscripciones_jb.html":
+                episode["podcast"] = node_podcast_title(anchor)
+            episodes.setdefault(match[1], episode)
     items = list(episodes.values())
     following = None
     pagination = soup.select_one('[data-trigger="ajax_pagination"][data-href][data-page]')
@@ -779,6 +794,7 @@ def library_collections(directory, config):
             group["episodes"].append({"id": audio.stem, "path": audio.resolve(),
                                       "url": data.get("url"),
                                       "published": publication_date(data.get("published")),
+                                      "podcast": data.get("podcast"),
                                       "title": " ".join(title.splitlines())})
         if folder.name.startswith("episode-") and group["episodes"]:
             group["title"] = group["episodes"][0]["title"]
@@ -894,8 +910,22 @@ def create_tui(args, player=None):
     class LibraryTable(DataTable):
         BINDINGS = (Binding("j", "cursor_down", show=False), Binding("k", "cursor_up", show=False),
                     Binding("g", "scroll_top", show=False), Binding("G", "scroll_bottom", show=False),
+                    Binding("home", "first_row", show=False),
+                    Binding("end", "last_row", show=False),
                     Binding("left", "app.seek(-10)", show=False),
                     Binding("right", "app.seek(10)", show=False))
+
+        def action_first_row(self):
+            """Va a la primera fila sin desplazar la tabla horizontalmente."""
+            self.scroll_x = 0
+            if self.row_count:
+                self.move_cursor(row=0)
+
+        def action_last_row(self):
+            """Va a la última fila sin desplazar la tabla horizontalmente."""
+            self.scroll_x = 0
+            if self.row_count:
+                self.move_cursor(row=self.row_count - 1)
 
     class PlaybackBar(ProgressBar):
         """Barra de progreso que solicita un seek absoluto al hacer clic."""
@@ -1103,8 +1133,12 @@ def create_tui(args, player=None):
             table.clear()
             for index, episode in enumerate(self.visible_episodes):
                 marker = "●" if episode.get("path") else "↓"
+                label = Text(f"{marker}  ")
+                if group["key"] == "account-new" and episode.get("podcast"):
+                    label.append(f'{episode["podcast"]} · ', style="#8facc4")
+                label.append(episode["title"])
                 table.add_row(episode.get("published") or "—",
-                              Text(f'{marker}  {episode["title"]}'), key=str(index))
+                              label, key=str(index))
             labels = {"newest": "más nuevos", "oldest": "más antiguos", "title": "A–Z"}
             self.query_one("#collection-title", Static).update(
                 f'{group["title"]}  ·  {labels[self.sort_mode]}')

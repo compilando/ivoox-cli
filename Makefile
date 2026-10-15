@@ -29,7 +29,7 @@ deps: ## Instala dependencias oficiales de Arch (idempotente)
 	sudo pacman -S --needed mpv fzf uv python file
 
 install: ## Instala ivx como herramienta Python aislada
-	$(UV) tool install --force --from . ivoox-cli
+	$(UV) tool install --force --refresh-package ivoox-cli --from . ivoox-cli
 	install -dm700 "$(CFG)"
 	$(IVX) --help
 

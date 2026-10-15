@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bs4 import BeautifulSoup
+from textual.coordinate import Coordinate
 from textual.widgets import Button, DataTable, Input, Static
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -165,13 +166,28 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_collection_filter_and_episode_filter_reset(self):
         async with self.app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            collections = self.app.query_one("#collections", DataTable)
+            original_title = self.app.groups[-1]["title"]
+            self.app.groups[-1]["title"] = "Podcast con un título " + "extremadamente largo " * 20
+            self.app.refresh_collection_table()
+            collections.focus()
+            await pilot.press("end")
+            await pilot.pause()
+            self.assertEqual(collections.cursor_row, collections.row_count - 1)
+            self.assertEqual(collections.scroll_x, 0)
+            await pilot.press("home")
+            await pilot.pause()
+            self.assertEqual(collections.cursor_row, 0)
+            self.assertEqual(collections.scroll_x, 0)
+            self.app.groups[-1]["title"] = original_title
+            self.app.refresh_collection_table()
+
             episode_search = self.app.query_one("#search", Input)
             episode_search.value = "sin coincidencias"
             episode_search.add_class("visible")
             await pilot.pause()
             self.assertEqual(self.app.query_one("#episodes", DataTable).row_count, 0)
 
-            collections = self.app.query_one("#collections", DataTable)
             collections.focus()
             collections.move_cursor(row=1)
             await pilot.pause()
@@ -286,7 +302,8 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
 
         latest = BeautifulSoup('''<tbody id="suscriptions" data-trigger="ajax_pagination"
           data-href="_jb_42" data-page="2" data-href-after="?&amp;audioview=1">
-          <tr><td><a class="title" href="/nuevo-audios-mp3_rf_11_1.html">Nuevo</a></td></tr>
+          <tr><td><a class="title" href="/nuevo-audios-mp3_rf_11_1.html">Nuevo</a>
+            <p>Mi Podcast . 01:02:03 mins | 14/10/2026</p></td></tr>
           <tr class="listened"><td>
             <a class="title" href="/escuchado-audios-mp3_rf_10_1.html">Escuchado</a>
           </td></tr>
@@ -296,6 +313,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             latest_items, latest_next = MODULE["account_episode_page"](
                 Client(), "https://www.ivoox.com/suscripciones_jb.html")
         self.assertEqual([episode["id"] for episode in latest_items], ["11"])
+        self.assertEqual(latest_items[0]["podcast"], "Mi Podcast")
         self.assertEqual(latest_next,
                          "https://www.ivoox.com/_jb_42_2.html?&audioview=1")
 
@@ -393,6 +411,21 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([episode["id"] for episode in group["episodes"]], ["1", "2", "3"])
             self.assertIsNone(group["next_url"])
             self.assertFalse(self.app.query_one("#pagination").has_class("visible"))
+
+    async def test_new_episodes_show_podcast_name(self):
+        self.app.account_groups = [{
+            "key": "account-new", "title": "Nuevos Episodios",
+            "url": "https://www.ivoox.com/suscripciones_jb.html",
+            "account": True, "loaded": True,
+            "episodes": [{"id": "11", "title": "Nuevo", "podcast": "Mi Podcast",
+                          "published": "2026-10-14"}],
+        }]
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            self.app.group_key = "account-new"
+            self.app.action_refresh_library()
+            await pilot.pause()
+            cell = self.app.query_one("#episodes", DataTable).get_cell_at(Coordinate(0, 1))
+            self.assertEqual(str(cell), "↓  Mi Podcast · Nuevo")
 
     async def test_publication_date_formats(self):
         parse = MODULE["publication_date"]
