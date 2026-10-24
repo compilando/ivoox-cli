@@ -98,8 +98,8 @@ contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming
 | `o` | Alternar orden: más nuevos, más antiguos y título A–Z |
 | `Esc` | Limpiar búsqueda o volver a colecciones |
 | `a` | Añadir URL de episodio, lista o programa |
-| `u` | Descargar hasta 10 episodios de la colección seleccionada |
-| `U` | Archivar todos los episodios del programa/suscripción, previa confirmación |
+| `u` | Descargar todos los episodios, previa confirmación y con 4 audios simultáneos |
+| `U` | Atajo alternativo para la misma descarga completa |
 | `m` | Cargar manualmente la siguiente página de una colección de la cuenta |
 | `M` | Igual que el botón: cargar todas las páginas restantes |
 | `r` | Actualizar Mis listas y Mis suscripciones desde iVoox |
@@ -112,7 +112,9 @@ vacía por un término de la colección anterior. Los controles por letras no
 interfieren cuando escribes en un campo de texto. También puedes seleccionar
 con ratón. Se recomienda una terminal de al menos 80×24.
 
-La TUI controla una instancia propia de mpv mediante un socket privado en un
+La descarga completa desde la TUI mantiene la paginación que sirve iVoox
+(normalmente 20 episodios por página), pero procesa hasta cuatro audios
+simultáneamente. La TUI controla una instancia propia de mpv mediante un socket privado en un
 temporal; no modifica otros reproductores ni la configuración de mpv. Un
 episodio remoto se reproduce en streaming con las cookies de iVoox. `u` lo
 descarga a la biblioteca usando el CLI en segundo plano, con los mismos
@@ -165,18 +167,18 @@ Variables sobreescribibles:
 | `CFG` | `$(HOME)/.config/ivx` | Fuentes, cookies y cachés de uv |
 | `INTERVAL` | `6h` | Intervalo del temporizador |
 | `URL` | — | Obligatoria para `get`, `archive` y `add` |
-| `N` | CLI: 10 | Máximo de episodios examinados por fuente |
+| `N` | `get`: sin límite; `sync`: 10 | Máximo de episodios examinados por fuente |
 | `J` | `get`: 1; `archive`: 2 | Descargas simultáneas |
 | `PLAN` | vacío | Con `1`, `archive` cuenta todo sin descargar |
 | `Q` | vacío | Filtro de título/ruta para reproducir |
 
-`N` cuenta episodios seleccionados, incluidos los ya descargados: repetir
-`get N=2` sobre una fuente sin cambios descarga cero, no los dos siguientes.
-Los límites evitan descargar accidentalmente un programa entero. Para ampliar
-el histórico, aumenta `N`. `archive` es la operación explícita para descargar
-el programa completo: primero descubre todos los episodios y luego usa una cola
-acotada (dos descargas simultáneas por defecto). Se pausa 1,5 segundos entre
-páginas HTML. Antes de una descarga grande, usa `PLAN=1` para ver el total.
+Sin `N`, `get` descarga la URL completa. `N` permite acotar expresamente la
+operación y cuenta episodios seleccionados, incluidos los ya descargados:
+repetir `get N=2` sobre una fuente sin cambios descarga cero, no los dos
+siguientes. `sync` conserva un límite predeterminado de 10 por fuente para que
+la actualización automática sea gradual. `archive` también descarga el programa
+completo, usa dos descargas simultáneas, guarda el progreso de la cola y permite
+consultar antes el total con `PLAN=1`. Se pausa 1,5 segundos entre páginas HTML.
 
 ```sh
 make install PREFIX="$HOME/.local" CFG="$HOME/.config/ivx"
@@ -185,10 +187,12 @@ make sync IVX_DIR="$HOME/Podcasts/ivoox" N=5
 ```
 
 La biblioteca tiene una carpeta por fuente (`episode-ID`, `list-ID`,
-`program-ID`), archivos `ID.mp3`, metadatos `ID.json` y `playlist.m3u` con rutas
-relativas. Un episodio presente en dos fuentes puede ocupar dos archivos.
-La playlist contiene todos los audios completados de esa carpeta, ordenados
-por identificador. `make ls` muestra sus títulos y rutas.
+`program-ID`). Los audios nuevos se llaman
+`podcast--titulo-del-episodio--ID.mp3`: el texto se acorta y slugifica, y el ID
+final evita colisiones. Los metadatos usan el mismo nombre con extensión `.json`;
+las bibliotecas antiguas con `ID.mp3` siguen funcionando sin renombrados. Cada
+carpeta incluye una `playlist.m3u` con rutas relativas. Un episodio presente en
+dos fuentes puede ocupar dos archivos. `make ls` muestra sus títulos y rutas.
 
 El archivado acepta tanto un programa público como una suscripción de tu cuenta
 y guarda `archive-state.json` con tareas completadas y fallidas.
@@ -238,7 +242,7 @@ cambia configuración global del sistema.
 
 Después de cambiar `PREFIX`, `IVX_DIR`, `CFG` o `INTERVAL`, vuelve a ejecutar
 `make timer-install` con las mismas variables. `sync` descarga como máximo
-10 episodios por fuente por ejecución. Sin `sources.txt` termina correctamente
+10 episodios por fuente por ejecución salvo que indiques `N`. Sin `sources.txt` termina correctamente
 sin crear la biblioteca. Añade tus programas con `make add URL=...`.
 
 ## Verificación real
@@ -275,8 +279,10 @@ del servidor hace fallar la prueba explícitamente; no se sustituye por mocks.
 
 ## Descarga y recuperación
 
-Los programas usan el RSS publicado en su página. Si falta o no se puede
-leer, se recorre el HTML. Las listas usan los módulos de episodios clásicos;
+Las descargas acotadas de programas usan el RSS publicado en su página. Una
+descarga completa recorre además todas las páginas HTML, porque el RSS puede
+contener solo una ventana reciente, y reutiliza de él las URLs directas de
+audio. Si falta o no se puede leer, se recorre el HTML. Las listas usan los módulos de episodios clásicos;
 los programas actuales usan enlaces de títulos en el contenedor que incluye `#tabs`. Se deduplican
 IDs y se sigue el enlace a la siguiente página de la misma fuente.
 

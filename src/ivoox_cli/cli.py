@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -69,6 +70,47 @@ def publication_date(value):
         return parsedate_to_datetime(value).date().isoformat()
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def source_title(url):
+    """Obtiene un nombre humano y estable a partir del slug público de iVoox."""
+    path = urlsplit(url).path.rsplit("/", 1)[-1]
+    slug = re.split(r"_(?:sq_f1\d+|bk_list_\d+|jb_\d+)", path, maxsplit=1)[0]
+    if slug == path:
+        return None
+    slug = slug.removeprefix("podcast-").strip("-_")
+    return " ".join(slug.replace("-", " ").replace("_", " ").split()).title() or None
+
+
+def filename_slug(value, limit):
+    """Crea un componente ASCII corto, portable y legible para un nombre de archivo."""
+    normalized = unicodedata.normalize("NFKD", str(value))
+    ascii_text = normalized.encode("ascii", "ignore").decode().casefold()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
+    return slug[:limit].rstrip("-")
+
+
+def episode_stem(episode):
+    """Nombre descriptivo; el ID final evita colisiones y permite localizar el audio."""
+    podcast = filename_slug(episode.get("podcast", ""), 60)
+    title = filename_slug(episode.get("title", ""), 100) or "episodio"
+    parts = [part for part in (podcast, title) if part]
+    return "--".join([*parts, str(episode["id"])])
+
+
+def episode_target(folder, episode):
+    """Reutiliza nombres previos y parciales antes de elegir el nombre descriptivo."""
+    identifier = str(episode["id"])
+    legacy = folder / f"{identifier}.mp3"
+    if legacy.exists() or legacy.with_suffix(".mp3.part").exists():
+        return legacy
+    candidates = sorted(folder.glob(f"*--{identifier}.mp3"))
+    partials = sorted(folder.glob(f"*--{identifier}.mp3.part"))
+    if candidates:
+        return candidates[0]
+    if partials:
+        return partials[0].with_suffix("")
+    return folder / f"{episode_stem(episode)}.mp3"
 
 
 def node_publication_date(node):
@@ -338,6 +380,7 @@ def discover(client, url, limit=None, no_rss=False, max_pages=None, delay=1.5):
     if kind == "episode":
         return [{"id": identifier, "url": url, "title": f"Episodio {identifier}"}], "episode", 1
     soup = html_page(client, url)
+    rss_episodes = {}
     if kind == "program" and not no_rss:
         feed = soup.select_one('a[href*="_fg_f"], link[type="application/rss+xml"]')
         if feed:
@@ -358,8 +401,12 @@ def discover(client, url, limit=None, no_rss=False, max_pages=None, delay=1.5):
                             "published": publication_date(item.findtext("pubDate", ""))})
                 if episodes:
                     log(f"RSS: {feed_url}")
-                    return list(episodes.values())[:limit], "rss", 1
-                log("RSS sin episodios descargables; usando HTML")
+                    if limit is not None:
+                        return list(episodes.values())[:limit], "rss", 1
+                    rss_episodes = episodes
+                    log("Descarga completa: comprobando todas las páginas HTML")
+                else:
+                    log("RSS sin episodios descargables; usando HTML")
             except (requests.RequestException, ET.ParseError) as exc:
                 log(f"RSS no disponible ({type(exc).__name__}); usando HTML")
     episodes = {}
@@ -383,7 +430,14 @@ def discover(client, url, limit=None, no_rss=False, max_pages=None, delay=1.5):
         if url:
             time.sleep(delay)
             soup = html_page(client, url)
-    return list(episodes.values())[:limit], "html", pages
+    items = list(episodes.values())[:limit]
+    for episode in items:
+        rss_episode = rss_episodes.get(episode["id"], {})
+        if rss_episode.get("media"):
+            episode["media"] = rss_episode["media"]
+        if not episode.get("published") and rss_episode.get("published"):
+            episode["published"] = rss_episode["published"]
+    return items, "html", pages
 
 
 def media_url(client, episode):
@@ -450,7 +504,7 @@ def audio_file(path):
 
 
 def download(episode, folder, cfg, rate=0):
-    target = folder / f'{episode["id"]}.mp3'
+    target = episode_target(folder, episode)
     if target.exists() and target.stat().st_size:
         metadata = target.with_suffix(".json")
         try:
@@ -624,6 +678,10 @@ def get(args, url, archive=False):
                                                delay=args.delay)
     if not episodes:
         raise ValueError("No se encontraron episodios")
+    podcast = source_title(url)
+    if podcast:
+        for episode in episodes:
+            episode.setdefault("podcast", podcast)
     folder = args.directory / key
     if archive and args.plan:
         print(json.dumps({"episodes": len(episodes), "method": method, "pages": pages,
@@ -791,7 +849,8 @@ def library_collections(directory, config):
             except (OSError, ValueError, AttributeError):
                 title = audio.stem
                 warnings.append(f"Metadatos ausentes o dañados: {audio.name}")
-            group["episodes"].append({"id": audio.stem, "path": audio.resolve(),
+            identifier = str(data.get("id") or audio.stem.rsplit("--", 1)[-1])
+            group["episodes"].append({"id": identifier, "path": audio.resolve(),
                                       "url": data.get("url"),
                                       "published": publication_date(data.get("published")),
                                       "podcast": data.get("podcast"),
@@ -1011,8 +1070,8 @@ def create_tui(args, player=None):
             Binding("slash", "search", "Buscar"), Binding("escape", "back", "Volver", show=False),
             Binding("f", "collection_search", "Buscar podcasts", show=False),
             Binding("o", "sort", "Ordenar"),
-            Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar"),
-            Binding("U", "archive_source", "Archivar todo"),
+            Binding("a", "add_source", "Añadir"), Binding("u", "sync_source", "Descargar todo"),
+            Binding("U", "archive_source", "Descargar todo", show=False),
             Binding("m", "load_more", "Más episodios", show=False),
             Binding("M", "load_all", "Cargar lista", show=False),
             Binding("r", "refresh_account", "Mi iVoox"),
@@ -1333,7 +1392,7 @@ def create_tui(args, player=None):
                         "s: stop · ←→: ±10 s · Mayús+←→: ±1 min · 0–9: posición absoluta\n"
                         "clic en la barra: ir a esa posición · n/p: siguiente/anterior\n"
                         "/: buscar en el panel · f: filtrar podcasts · a: añadir URL\n"
-                        "u: descargar colección (10 últimos)\n"
+                        "u: descargar el podcast completo (pide confirmación)\n"
                         "o: ordenar por fecha descendente/ascendente o título\n"
                         "m: otra página · M/botón: lista completa · U: archivar todo\n"
                         "r: actualizar Mi iVoox · Esc: volver · q: salir y detener mpv\n"
@@ -1463,7 +1522,14 @@ def create_tui(args, player=None):
             if self.busy:
                 self.notice("Ya hay una operación en curso")
             elif group and group["url"]:
-                self.cli_job("get", group["url"], "-n", "10")
+                try:
+                    archiveable = source(group["url"])[0] == "program"
+                except ValueError:
+                    archiveable = account_source(group["url"])[0].startswith("account-sub-")
+                if archiveable:
+                    self.action_archive_source()
+                else:
+                    self.cli_job("get", group["url"])
             else:
                 self.notice("Selecciona una fuente añadida con a para descargar sus episodios")
 
@@ -1488,15 +1554,15 @@ def create_tui(args, player=None):
 
         def archive_result(self, confirmed, url):
             if confirmed:
-                self.cli_job("archive", url)
+                self.cli_job("archive", url, "-j", "4")
 
         @work(exclusive=True, group="cli")
         async def cli_job(self, *arguments):
             self.busy = True
             messages = {
                 "add": "Guardando fuente…",
-                "get": "Descargando hasta 10 episodios… puedes seguir navegando y escuchando",
-                "archive": "Archivando el podcast completo… puedes seguir navegando y escuchando",
+                "get": "Descargando la colección completa… puedes seguir navegando y escuchando",
+                "archive": "Archivando el podcast completo con 4 descargas simultáneas…",
             }
             self.notice(messages[arguments[0]])
             try:
@@ -1521,7 +1587,7 @@ def create_tui(args, player=None):
                         kind, identifier, _ = source(arguments[1])
                         self.group_key = f"{kind}-{identifier}"
                         self.action_refresh_library()
-                        self.notice("Fuente añadida. Pulsa u para descargar sus últimos episodios.")
+                        self.notice("Fuente añadida. Pulsa u para descargarla completa.")
             except (OSError, ValueError) as exc:
                 if not self.closed:
                     self.notice(f"No se pudo completar la operación: {exc}")
@@ -1560,7 +1626,10 @@ def main():
         command = commands.add_parser(name)
         if name != "sync":
             command.add_argument("url")
-        command.add_argument("-n", type=positive, default=None if name == "inspect" else 10)
+        default_limit = 10 if name == "sync" else None
+        command.add_argument("-n", type=positive, default=default_limit,
+                             help="máximo de episodios (sin límite por defecto)"
+                             if name != "sync" else "máximo por fuente (por defecto: 10)")
         command.add_argument("-j", type=positive, default=1)
         command.add_argument("--no-rss", action="store_true", help="forzar scraping HTML")
         command.add_argument("--delay", type=float, default=1.5, help="pausa entre páginas (segundos)")

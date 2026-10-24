@@ -375,7 +375,72 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.click("#archive-confirm")
                 await pilot.pause()
-                job.assert_called_once_with("archive", self.url)
+                job.assert_called_once_with("archive", self.url, "-j", "4")
+
+    async def test_normal_download_archives_the_complete_podcast(self):
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            self.app.group_key = "program-1234"
+            self.app.show_episodes()
+            with patch.object(self.app, "cli_job") as job:
+                await pilot.press("u")
+                await pilot.pause()
+                self.assertEqual(
+                    str(self.app.screen.query_one("#archive-title", Static).render()), "Ciencia")
+                await pilot.click("#archive-confirm")
+                await pilot.pause()
+                job.assert_called_once_with("archive", self.url, "-j", "4")
+
+    async def test_descriptive_slugged_filenames_keep_the_episode_id(self):
+        episode = {
+            "id": "12345",
+            "podcast": "Ciencia y Tecnología",
+            "title": "¿Qué pasó? Una explicación / muy larga",
+        }
+        self.assertEqual(
+            MODULE["episode_stem"](episode),
+            "ciencia-y-tecnologia--que-paso-una-explicacion-muy-larga--12345",
+        )
+        self.assertEqual(MODULE["source_title"](self.url), "Ciencia")
+        folder = Path(self.tmp.name) / "names"
+        folder.mkdir()
+        target = MODULE["episode_target"](folder, episode)
+        self.assertEqual(target.name, MODULE["episode_stem"](episode) + ".mp3")
+        legacy = folder / "12345.mp3.part"
+        legacy.write_bytes(b"partial")
+        self.assertEqual(MODULE["episode_target"](folder, episode), folder / "12345.mp3")
+
+    async def test_unlimited_discovery_does_not_treat_a_short_rss_as_complete(self):
+        page_two_url = "https://www.ivoox.com/podcast-ciencia_sq_f11234_2.html"
+        pages = {
+            self.url: BeautifulSoup(f'''<a href="/feed_fg_f.xml">RSS</a>
+              <h2><a href="/uno_rf_1_1.html">Uno</a></h2>
+              <a href="{page_two_url}">2</a>''', "html.parser"),
+            page_two_url: BeautifulSoup(
+                '<h2><a href="/dos_rf_2_1.html">Dos</a></h2>', "html.parser"),
+        }
+        rss = b'''<rss><channel><item><title>Uno</title>
+          <link>https://www.ivoox.com/uno_rf_1_1.html</link>
+          <enclosure url="https://cdn.example/uno.mp3" /></item></channel></rss>'''
+
+        class Response:
+            content = rss
+
+            def raise_for_status(self):
+                return None
+
+        class Client:
+            def get(self, url, timeout):
+                return Response()
+
+        clock = type("Clock", (), {"sleep": staticmethod(lambda seconds: None)})
+        with patch.dict(MODULE["discover"].__globals__, {
+            "html_page": lambda client, url: pages[url], "time": clock,
+        }):
+            episodes, method, count = MODULE["discover"](Client(), self.url, None)
+        self.assertEqual([episode["id"] for episode in episodes], ["1", "2"])
+        self.assertEqual(episodes[0]["media"], "https://cdn.example/uno.mp3")
+        self.assertEqual((method, count), ("html", 2))
 
     async def test_load_all_pages_button(self):
         account_url = "https://www.ivoox.com/mi-podcast_jb_88_1.html"

@@ -36,7 +36,7 @@ install: ## Instala ivx como herramienta Python aislada
 uninstall: ## Pide confirmación y retira binario y unidades; conserva biblioteca/config
 	@$(PYTHON) scripts/manage.py uninstall
 
-get: ## Descarga URL=...; opcional N=... y J=...
+get: ## Descarga completa URL=...; N=... permite limitar y J=... paralelizar
 	@test -n "$${URL:-}" || { echo 'Falta URL. Uso: make get URL=https://www.ivoox.com/...' >&2; exit 2; }
 	args=(); [[ -z "$${N:-}" ]] || args+=(-n "$$N"); [[ -z "$${J:-}" ]] || args+=(-j "$$J")
 	$(IVX) get "$$URL" "$${args[@]}"
