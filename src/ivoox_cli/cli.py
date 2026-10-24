@@ -1554,15 +1554,20 @@ def create_tui(args, player=None):
 
         def archive_result(self, confirmed, url):
             if confirmed:
-                self.cli_job("archive", url, "-j", "4")
+                # Dos transferencias equilibran rendimiento y archivos parciales,
+                # igual que el valor predeterminado del comando archive.
+                self.cli_job("archive", url, "-j", "2")
 
         @work(exclusive=True, group="cli")
         async def cli_job(self, *arguments):
             self.busy = True
+            job_title = next((group["title"] for group in self.groups
+                              if len(arguments) > 1 and group.get("url") == arguments[1]),
+                             "la colección")
             messages = {
                 "add": "Guardando fuente…",
                 "get": "Descargando la colección completa… puedes seguir navegando y escuchando",
-                "archive": "Archivando el podcast completo con 4 descargas simultáneas…",
+                "archive": "Archivando el podcast completo con 2 descargas simultáneas…",
             }
             self.notice(messages[arguments[0]])
             try:
@@ -1578,11 +1583,17 @@ def create_tui(args, player=None):
                         self.notify(stderr.decode(errors="replace")[-1000:], severity="error", timeout=10)
                     elif arguments[0] == "get":
                         result = json.loads(stdout.decode().splitlines()[-1])
-                        self.notice(f'Descargados: {result["downloaded"]} · Ya guardados: {result["skipped"]}')
+                        message = (f'{job_title}: descargados: {result["downloaded"]} · '
+                                   f'ya guardados: {result["skipped"]}')
+                        self.notice(message)
+                        self.notify(message, title="Descarga finalizada", timeout=12)
                     elif arguments[0] == "archive":
                         result = json.loads(stdout.decode().splitlines()[-1])
-                        self.notice(f'Archivo completo · descargados: {result["downloaded"]} · '
-                                    f'ya guardados: {result["skipped"]} · fallidos: {result["failed"]}')
+                        message = (f'{job_title}: archivo completo · descargados: '
+                                   f'{result["downloaded"]} · ya guardados: '
+                                   f'{result["skipped"]} · fallidos: {result["failed"]}')
+                        self.notice(message)
+                        self.notify(message, title="Descarga finalizada", timeout=12)
                     else:
                         kind, identifier, _ = source(arguments[1])
                         self.group_key = f"{kind}-{identifier}"

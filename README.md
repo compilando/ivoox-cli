@@ -98,7 +98,7 @@ contenido de la cuenta, `⌂` una fuente local, `↓` un episodio para streaming
 | `o` | Alternar orden: más nuevos, más antiguos y título A–Z |
 | `Esc` | Limpiar búsqueda o volver a colecciones |
 | `a` | Añadir URL de episodio, lista o programa |
-| `u` | Descargar todos los episodios, previa confirmación y con 4 audios simultáneos |
+| `u` | Descargar todos los episodios, previa confirmación y con 2 audios simultáneos |
 | `U` | Atajo alternativo para la misma descarga completa |
 | `m` | Cargar manualmente la siguiente página de una colección de la cuenta |
 | `M` | Igual que el botón: cargar todas las páginas restantes |
@@ -113,13 +113,14 @@ interfieren cuando escribes en un campo de texto. También puedes seleccionar
 con ratón. Se recomienda una terminal de al menos 80×24.
 
 La descarga completa desde la TUI mantiene la paginación que sirve iVoox
-(normalmente 20 episodios por página), pero procesa hasta cuatro audios
-simultáneamente. La TUI controla una instancia propia de mpv mediante un socket privado en un
-temporal; no modifica otros reproductores ni la configuración de mpv. Un
-episodio remoto se reproduce en streaming con las cookies de iVoox. `u` lo
-descarga a la biblioteca usando el CLI en segundo plano, con los mismos
-bloqueos y reanudación. Salir durante una descarga la interrumpe y conserva los
-parciales.
+(normalmente 20 episodios por página), pero procesa hasta dos audios
+simultáneamente. Al terminar muestra una notificación con el nombre del podcast,
+aunque entretanto hayas navegado a otra colección. La TUI controla una instancia
+propia de mpv mediante un socket privado en un temporal; no modifica otros
+reproductores ni la configuración de mpv. Un episodio remoto se reproduce en
+streaming con las cookies de iVoox. `u` lo descarga a la biblioteca usando el
+CLI en segundo plano, con los mismos bloqueos y reanudación. Salir durante una
+descarga la interrumpe y conserva los parciales.
 
 La barra inferior muestra la posición absoluta y permite saltar a cualquier
 punto con un clic. El comando `ivx play` también abre los controles gráficos de

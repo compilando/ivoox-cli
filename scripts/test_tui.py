@@ -375,7 +375,7 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.click("#archive-confirm")
                 await pilot.pause()
-                job.assert_called_once_with("archive", self.url, "-j", "4")
+                job.assert_called_once_with("archive", self.url, "-j", "2")
 
     async def test_normal_download_archives_the_complete_podcast(self):
         async with self.app.run_test(size=(100, 30)) as pilot:
@@ -389,7 +389,36 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     str(self.app.screen.query_one("#archive-title", Static).render()), "Ciencia")
                 await pilot.click("#archive-confirm")
                 await pilot.pause()
-                job.assert_called_once_with("archive", self.url, "-j", "4")
+                job.assert_called_once_with("archive", self.url, "-j", "2")
+
+    async def test_download_completion_is_not_lost_after_changing_podcast(self):
+        release = asyncio.Event()
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self):
+                await release.wait()
+                result = {"downloaded": 3, "skipped": 2, "failed": 0}
+                return json.dumps(result).encode() + b"\n", b""
+
+        async def completed_process(*command, **kwargs):
+            return Process()
+
+        async with self.app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with (patch.object(asyncio, "create_subprocess_exec", completed_process),
+                  patch.object(self.app, "notify") as notify):
+                self.app.cli_job("archive", self.url, "-j", "2")
+                await pilot.pause()
+                self.app.group_key = "all"
+                self.app.show_episodes()
+                release.set()
+                await self.app.workers.wait_for_complete()
+                message = "Ciencia: archivo completo · descargados: 3 · ya guardados: 2 · fallidos: 0"
+                self.assertEqual(str(self.app.query_one("#notice", Static).render()), message)
+                notify.assert_called_once_with(
+                    message, title="Descarga finalizada", timeout=12)
 
     async def test_descriptive_slugged_filenames_keep_the_episode_id(self):
         episode = {
